@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telescope-control"
+version = "0.1.0"
+description = "Raspberry Pi visual telescope tracking and bounded Celestron AUX motor control"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "psutil>=5.9,<8",
+  "uvicorn>=0.30,<1",
+  "websockets>=13,<16",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.9,<1"]
+desktop-vision = ["numpy>=1.24", "opencv-contrib-python>=4.8"]
+
+[project.urls]
+Repository = "https://github.com/mjklopfer/telescope-control"
+Issues = "https://github.com/mjklopfer/telescope-control/issues"
+
+[tool.setuptools]
+py-modules = [
+  "celestron_probe",
+  "endpoint_lock",
+  "motor_control",
+  "network_info",
+  "position_control",
+  "setup_backend",
+  "tracking_stream",
+  "wifly_configure",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+

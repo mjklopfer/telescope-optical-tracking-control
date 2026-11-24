@@ -1,0 +1,19 @@
+[Unit]
+Description=Telescope Visual Tracking Dashboard
+Wants=network-online.target celestron-bridge.service
+After=network-online.target celestron-bridge.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h/telescope-control
+ExecStart=%h/telescope-control/tools/run_pi_vision_dashboard.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=5
+KillMode=control-group
+SendSIGKILL=yes
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

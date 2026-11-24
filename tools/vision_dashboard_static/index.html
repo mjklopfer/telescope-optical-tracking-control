@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telescope Visual Tracking Dashboard</title>
+  <style>
+    :root { color-scheme: dark; --panel:#18212b; --line:#334454; --text:#eaf2f8;
+      --muted:#9db0c0; --green:#4ee38a; --amber:#ffc857; --red:#ff5d73; --cyan:#4cc9f0; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:14px system-ui, sans-serif; background:#0e141b; color:var(--text); }
+    header { padding:14px 18px; border-bottom:1px solid var(--line); display:flex;
+      gap:14px; align-items:center; flex-wrap:wrap; }
+    h1 { font-size:19px; margin:0 auto 0 0; }
+    .badge { padding:5px 9px; border-radius:5px; font-weight:700; background:#394755; }
+    .locked { background:#17653a; } .lost,.error { background:#7c2633; }
+    .searching,.coasting { background:#755617; }
+    .motor-on { background:#a52d40; border-color:#ff7a8d; }
+    .rocker { display:flex; gap:0; align-items:center; }
+    .rocker button { border-radius:0; min-width:70px; }
+    .rocker button:first-child { border-radius:5px 0 0 5px; }
+    .rocker button:nth-child(2) { border-radius:0 5px 5px 0; }
+    .rocker .active-off { background:#5b252d; border-color:#ff5d73; }
+    .rocker .active-on { background:#17653a; border-color:#4ee38a; }
+    .pilot { width:15px;height:15px;border-radius:50%;display:inline-block;margin-left:12px;background:#ff5d73;box-shadow:0 0 7px currentColor; }
+    .pilot.green { background:#4ee38a;color:#4ee38a; }.pilot.amber { background:#ffc857;color:#ffc857; }
+    .mode-rocker { display:flex; gap:0; border:2px solid #62798c; border-radius:7px; }
+    .mode-rocker button { border-radius:0; min-width:145px; padding:10px 14px; font-size:15px; opacity:.55; }
+    .mode-rocker button:first-child { border-radius:5px 0 0 5px; }
+    .mode-rocker button:last-child { border-radius:0 5px 5px 0; }
+    .mode-rocker .active { opacity:1; font-weight:850; box-shadow:0 0 12px currentColor; }
+    body.live-mode #liveMode { background:#17653a; border-color:#4ee38a; color:#d9ffe8; }
+    body.demo-mode #demoMode { background:#8a4b12; border-color:#ffad42; color:#fff0d1; }
+    body.live-mode #demoControls { display:none; }
+    body.demo-mode #liveControls { display:none; }
+    .mode-banner { padding:13px 16px; border:2px solid; border-radius:8px; font-size:15px; }
+    .mode-banner strong { display:block; font-size:20px; margin-bottom:3px; letter-spacing:.03em; }
+    body.live-mode .mode-banner { background:#113c2a; border-color:#4ee38a; color:#dcffea; }
+    body.demo-mode .mode-banner { background:#512e0e; border-color:#ffad42; color:#fff0d1; }
+    body.live-mode #liveControls { border:2px solid #4ee38a; }
+    body.demo-mode #demoControls { border:2px solid #ffad42; }
+    main { max-width:1400px; margin:auto; padding:14px; display:grid; gap:14px; }
+    .top { display:grid; grid-template-columns:minmax(480px, 2fr) minmax(270px, .8fr); gap:14px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; }
+    .video-wrap { position:relative; line-height:0; width:100%; background:#000; min-height:240px; }
+    #video { display:block; width:100%; height:auto; }
+    #overlay { position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; }
+    #modeWatermark { position:absolute; z-index:3; top:10px; left:10px; padding:7px 10px;
+      border-radius:5px; font-weight:900; font-size:14px; line-height:1; pointer-events:none; }
+    body.live-mode #modeWatermark { background:rgba(16,101,58,.9); border:1px solid #4ee38a; }
+    body.demo-mode #modeWatermark { background:rgba(138,75,18,.92); border:1px solid #ffad42; }
+    h2 { font-size:16px; margin:0 0 10px; }
+    .controls { display:grid; gap:10px; }
+    label { color:var(--muted); display:grid; gap:4px; }
+    select,input,button { color:var(--text); background:#101820; border:1px solid #53687a;
+      padding:7px; border-radius:4px; }
+    button { cursor:pointer; font-weight:650; } button:hover { border-color:var(--cyan); }
+    .row { display:flex; gap:7px; align-items:end; } .row > * { flex:1; }
+    .readouts { display:grid; grid-template-columns:1fr 1fr; gap:6px 12px; }
+    .readouts span:nth-child(odd) { color:var(--muted); }
+    .warning { padding:9px; border:1px solid #8b6b27; background:#382b12; color:#ffe3a1; }
+    .charts { display:grid; grid-template-columns:2fr 1fr; gap:14px; }
+    .encoder-charts { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    [hidden] { display:none !important; }
+    canvas.chart { width:100%; height:240px; background:#101820; border:1px solid var(--line); }
+    .legend { display:flex; gap:14px; color:var(--muted); margin:6px 0 0; }
+    .swatch { width:11px; height:3px; display:inline-block; vertical-align:middle; margin-right:4px; }
+    #message { min-height:20px; color:var(--amber); }
+    @media (max-width:850px) { .top,.charts { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Telescope Visual Tracking Dashboard</h1>
+    <div class="mode-rocker"><button id="liveMode">LIVE MODE</button><button id="demoMode">DEMO MODE</button></div>
+    <span id="socketBadge" class="badge searching">CONNECTING</span>
+    <span id="trackBadge" class="badge searching">STARTING</span>
+    <span id="motorBadge" class="badge error">MOTOR OUTPUT DISABLED</span>
+  </header>
+  <main>
+    <section id="modeBanner" class="mode-banner"><strong id="modeBannerTitle">LIVE MODE — REAL CAMERA / REAL TELESCOPE</strong><span id="modeBannerText">Click a real image feature, then use RESUME / ON to command the connected mount.</span></section>
+    <section class="top">
+      <div class="panel">
+        <h2>Live camera and selectable objects</h2>
+        <div class="video-wrap">
+          <img id="video" src="/video_feed" alt="Live tracking camera">
+          <canvas id="overlay"></canvas>
+          <span id="modeWatermark">LIVE CAMERA</span>
+        </div>
+        <p id="videoHelp" style="color:var(--muted)">Click the image to select a tracking target.</p>
+      </div>
+      <aside id="liveControls" class="panel controls">
+        <h2>Live optical tracking</h2>
+        <div class="warning">Tracking output starts OFF. Select a camera, click a distinct high-contrast feature, confirm the lock box, then turn tracking ON only with the telescope clear to move.</div>
+        <label>Camera
+          <div class="row"><select id="cameraSelect"><option value="">Searching for cameras…</option></select><button id="refreshCameras">Refresh camera list</button><button id="recoverCamera">Recover camera</button></div>
+        </label>
+        <p style="color:var(--muted)">Recover camera turns optical motor output OFF and restarts only the vision/camera service. The telescope bridge remains running, and this page reconnects automatically.</p>
+        <label>Camera resolution and frame rate
+          <div class="row"><select id="cameraSetting"><option value="">Select a camera</option></select><button id="applyCamera">Use selected camera</button></div>
+        </label>
+        <fieldset>
+          <legend>Camera exposure and gain</legend>
+          <label><span><input id="autoExposure" type="checkbox" checked> Automatic exposure and gain</span></label>
+          <label>Automatic exposure compensation <span id="exposureValueRange">(camera range pending)</span>
+            <input id="exposureValue" type="range" min="-4" max="4" step="0.25" value="0">
+          </label>
+          <div class="row">
+            <label>Manual exposure (µs) <span id="manualExposureRange"></span><input id="manualExposure" type="number" min="100" max="1000000" value="10000"></label>
+            <label>Manual analogue gain <span id="manualGainRange"></span><input id="manualGain" type="number" min="1" max="32" step="0.1" value="1"></label>
+          </div>
+          <button id="applyExposure">Apply camera exposure</button>
+          <p style="color:var(--muted)">Automatic is the default. Manual values are used only when automatic exposure and gain is unchecked. Hardware limits are read from the selected Pi camera; USB cameras without control enumeration retain conservative fallback limits.</p>
+        </fieldset>
+        <fieldset>
+          <legend>Preview and tracking image curve</legend>
+          <label>Black point <input id="curveBlack" type="range" min="0" max="254" value="0"></label>
+          <label>White point <input id="curveWhite" type="range" min="1" max="255" value="255"></label>
+          <label>Gamma <input id="curveGamma" type="range" min="0.2" max="3" step="0.05" value="1"></label>
+          <button id="applyCurve">Apply image curve</button>
+          <p id="curveSummary" style="color:var(--muted)">Black 0; white 255; gamma 1.00.</p>
+        </fieldset>
+        <label>Tracking aim
+          <select id="aimMode"><option value="center">Bring selected feature to frame center</option><option value="hold">Track at its present field position</option></select>
+        </label>
+        <fieldset>
+          <legend>Measured camera-to-mount mapping</legend>
+          <label>Maximum bounded probe movement
+            <select id="orientationStep"><option value="0.005">0.005°</option><option value="0.01">0.01°</option><option value="0.02">0.02°</option><option value="0.05">0.05°</option><option value="0.1">0.1°</option><option value="0.5" selected>0.5° — default</option><option value="1">1.0°</option></select>
+          </label>
+          <label>Calibration motor slew level
+            <select id="orientationRate"><option value="1" selected>1 — slowest (default)</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9">9 — fastest</option></select>
+          </label>
+          <div class="row"><button id="learnOrientation">Learn / validate motor mapping</button><button id="clearOrientation">Clear saved mapping</button></div>
+          <p id="orientationStatus" class="warning">Not learned. Lock a stable feature before enabling output.</p>
+          <div class="readouts">
+            <span>Azimuth motor image direction</span><b id="azimuthMapping">Not measured</b>
+            <span>Elevation motor image direction</span><b id="elevationMapping">Not measured</b>
+            <span>Mapping source</span><b id="mappingSource">Not measured</b>
+          </div>
+          <p style="color:var(--muted)">Required before optical motor output. RESUME / ON runs this automatically when no valid mapping exists. Each axis probe now starts at no more than 0.05° and increases only when the feature moves less than 3 pixels, never exceeding the selected maximum. The telescope measures the feature's pixel vector and encoder delta, returns at no more than level 2, saves the result, then begins tracking. Use slew level 1 when preserving a narrow-field lock matters.</p>
+        </fieldset>
+        <fieldset>
+          <legend>Vibration and lost-lock handling</legend>
+          <label><span><input id="travelEnvelopeEnabled" type="checkbox"> Limit travel from the current session origin</span></label>
+          <div class="row"><label>Optional travel bound (degrees)<input id="travelEnvelopeDegrees" type="number" min="0.1" max="90" step="0.1" value="5"></label><button id="travelEnvelopeApply">Apply and rebase origin</button></div>
+          <p style="color:var(--muted)">Default: OFF. When enabled, this limits commanded travel relative to fresh encoder readings captured when Apply is clicked. It is not tied to an older session or telescope power state.</p>
+          <label><span><input id="vibrationEnabled" type="checkbox"> Smooth brief mount vibration</span></label>
+          <div class="row"><label>Vibration threshold (pixels)<input id="vibrationThreshold" type="number" min="0.5" max="25" step="0.5" value="3"></label><button id="vibrationApply">Apply while output is OFF</button></div>
+          <label>When optical lock is lost
+            <div class="row"><select id="liveLossMode"><option value="stop">Stop and search at current position</option><option value="return-last-lock" selected>Return to last confirmed encoder position</option><option value="predictive-coast">Predictive coast, then Stop</option></select><select id="liveLossTime"><option value="0.25">0.25 s</option><option value="0.5" selected>0.5 s</option><option value="1">1 s</option><option value="2">2 s</option><option value="3">3 s</option><option value="5">5 s</option></select><button id="liveLossApply">Apply while output is OFF</button></div>
+          </label>
+          <p style="color:var(--muted)">Vibration filtering smooths short excursions below the threshold; a persistent change is accepted after three frames. Return mode commands the last encoder position where the feature was visible, then stops there while the camera attempts reacquisition. It does not perform an unbounded sky scan.</p>
+        </fieldset>
+        <label>Click-to-lock box size
+          <select id="liveBoxSize"><option value="0.06">6% — small feature</option><option value="0.12" selected>12% — normal</option><option value="0.20">20% — large feature</option></select>
+        </label>
+        <p style="color:var(--muted)">Click the live image to lock a high-contrast point. A fixed-size CSRT box follows the selected texture. If that exact feature is no longer credible, motor corrections freeze and the display shows REACQUIRING; tracking resumes only after the original feature produces two consistent, unique template matches. Click again with tracking OFF to choose another target.</p>
+        <div class="row"><button id="liveClear">Clear target lock</button><button id="resetLiveView">Reset live view</button><button id="liveRecord">Start telemetry recording</button></div>
+        <label>Optical tracking output
+          <div class="rocker"><button id="liveMotorOff" class="active-off">OFF</button><button id="liveMotorOn">RESUME / ON</button><span id="liveMotorPilot" class="pilot"></span><b id="liveMotorState">DISARMED</b></div>
+        </label>
+        <div class="readouts">
+          <span>Target state</span><b id="liveTargetState">—</b>
+          <span>X error</span><b id="liveDx">—</b>
+          <span>Y error</span><b id="liveDy">—</b>
+          <span>Camera rate</span><b id="liveFps">—</b>
+          <span>Motor link</span><b id="liveLink">—</b>
+          <span>Camera device</span><b id="liveCamera">—</b>
+          <span>Exposure</span><b id="liveExposure">—</b>
+          <span>Analogue gain</span><b id="liveGain">—</b>
+          <span>Focus score</span><b id="liveFocus">—</b>
+        </div>
+        <div id="liveMessage" class="warning">Waiting for camera and motor-link status.</div>
+      </aside>
+      <aside id="demoControls" class="panel controls">
+        <h2>Tracking selection</h2>
+        <label>Tracking mode
+          <div class="row"><select id="trackingMode"><option value="threshold">Thresholded objects</option><option value="feature-roi">Feature ROI</option></select>
+            <select id="featureAlgorithm"><option>CSRT</option><option>KCF</option><option>MOSSE</option></select>
+            <button id="trackingModeButton">Apply while output is OFF</button></div>
+        </label>
+        <label><span><input id="lockRoiSize" type="checkbox" checked> Lock Feature ROI size (recommended)</span></label>
+        <div id="featureHelp" style="color:var(--muted)">Threshold mode: click a detected bounding box.</div>
+        <label>Visible object
+          <select id="objectSelect"><option value="">No visible objects</option></select>
+        </label>
+        <div class="row">
+          <button id="selectButton">Track selected object</button>
+          <button id="clearButton">Clear selection</button>
+        </div>
+        <label>Object polarity
+          <div class="row"><select id="polarity"><option value="bright">Bright object / dark background</option><option value="dark">Dark object / light background</option></select>
+            <button id="polarityButton">Apply</button></div>
+        </label>
+        <label>Detection threshold (1–254)
+          <div class="row"><input id="threshold" type="number" min="1" max="254" value="160">
+            <button id="thresholdButton">Apply</button></div>
+        </label>
+        <label><span><input id="recording" type="checkbox"> Record selected-object telemetry as CSV</span></label>
+        <label>Hardware-in-the-loop motor output
+          <div class="rocker"><button id="motorOff" class="active-off">OFF</button><button id="motorOn">ON</button><span id="motorPilot" class="pilot" title="Motor output state"></span><b id="motorStateText">DISARMED</b></div>
+        </label>
+        <label>Motor target dispatch rate
+          <div class="row"><select id="hilRate"><option>1</option><option>2</option><option selected>4</option><option>6</option><option>8</option><option>10</option><option>15</option><option>20</option></select>
+            <button id="hilRateButton">Apply while output is OFF</button></div>
+        </label>
+        <label>Synthetic display span (degrees, edge-to-edge per axis)
+          <div class="row"><select id="hilSpan"><option>0.1</option><option>0.5</option><option>1</option><option selected>5</option><option>10</option></select>
+            <button id="hilSpanButton">Apply while output is OFF</button></div>
+        </label>
+        <label>Target-loss behavior
+          <div class="row"><select id="hilLossMode"><option value="stop">Stop and reacquire</option><option value="predictive-coast">Predictive coast, then Stop</option></select>
+            <select id="hilCoast"><option value="0.25">0.25 s</option><option value="0.5" selected>0.5 s</option><option value="1">1 s</option><option value="2">2 s</option><option value="3">3 s</option><option value="5">5 s — aggressive</option></select>
+            <button id="hilLossButton">Apply while output is OFF</button></div>
+        </label>
+        <label>Outer-loop prediction and lead
+          <div class="row"><select id="controlPreset"><option value="off">Off — latest position only</option><option value="conservative">Conservative</option><option value="balanced">Balanced</option><option value="aggressive">Aggressive</option><option value="auto">Auto-estimate lag</option><option value="custom">Custom</option></select>
+            <input id="predictionHorizon" type="number" min="0" max="1.5" step="0.05" value="0.25" title="Prediction horizon, seconds">
+            <input id="proportionalLead" type="number" min="0" max="1" step="0.05" value="0.2" title="Proportional lead">
+            <input id="correctionDeadband" type="number" min="0" max="0.5" step="0.01" value="0.03" title="Correction deadband, degrees">
+            <button id="controlPresetButton">Apply while output is OFF</button></div>
+        </label>
+        <label><span><input id="blinkEnabled" type="checkbox"> Blink/fade largest synthetic object</span></label>
+        <div class="row">
+          <label>Fade out (s)<input id="fadeOut" type="number" min="0.1" max="10" step="0.1" value="0.5"></label>
+          <label>Hidden (s)<input id="hiddenTime" type="number" min="0" max="10" step="0.1" value="0.5"></label>
+          <label>Fade in (s)<input id="fadeIn" type="number" min="0.1" max="10" step="0.1" value="0.5"></label>
+          <label>Repeat period (s)<input id="blinkPeriod" type="number" min="0.5" max="30" step="0.1" value="4"></label>
+        </div>
+        <button id="blinkButton">Apply blink test while output is OFF</button>
+        <div id="blinkStatus" style="color:var(--muted)">Synthetic blink test disabled.</div>
+        <div id="hilDetails" class="warning">Display-only mode. Relaunch with a guarded motor endpoint to enable hardware-loop testing.</div>
+        <div id="evaluationNotice" class="warning">Display-only mode; motor output is unavailable.</div>
+        <div class="readouts">
+          <span>Selected ID</span><b id="selected">—</b>
+          <span>Objects visible</span><b id="count">0</b>
+          <span>X error</span><b id="dx">—</b>
+          <span>Y error</span><b id="dy">—</b>
+          <span>Capture rate</span><b id="fps">—</b>
+          <span>Processing</span><b id="latency">—</b>
+          <span>Frame</span><b id="frame">—</b>
+          <span>Recording file</span><b id="recordPath">—</b>
+        </div>
+        <div id="message"></div>
+      </aside>
+    </section>
+
+    <section id="bridgePanel" class="panel">
+      <div class="row"><h2 style="flex:4">Control Bridge and motor link</h2><button id="refreshBridge">Refresh status</button><button id="reconnectBridge">Reconnect Motor Link</button><button id="restartBridge">Restart Bridge &amp; Reconnect Motors</button></div>
+      <div class="readouts">
+        <span>Bridge management API</span><b id="bridgeManagement">—</b>
+        <span>Bridge process state</span><b id="bridgeReady">—</b>
+        <span>Dashboard data connection</span><b id="bridgeData">—</b>
+        <span>Reconnect attempts</span><b id="bridgeReconnects">—</b>
+        <span>Cached motor feedback</span><b id="bridgeFeedback">—</b>
+        <span>Last connection error</span><b id="bridgeError">—</b>
+      </div>
+      <p id="bridgeMessage" style="color:var(--muted)">Waiting for the read-only Bridge management endpoint.</p>
+      <p class="warning"><b>Reconnect Motor Link</b> rebuilds this dashboard's connection to a running Bridge. <b>Restart Bridge &amp; Reconnect Motors</b> restarts the Pi user service, waits for the Bridge, then rebuilds and verifies the motor link. Either action pauses optical motor output first; neither restarts the telescope Wi-Fi adapter.</p>
+    </section>
+
+    <section class="charts">
+      <div class="panel">
+        <div class="row"><h2 style="flex:4">Selected-object centroid drift</h2>
+          <label>Window
+            <select id="windowSeconds"><option>10</option><option selected>30</option><option>60</option></select>
+          </label></div>
+        <canvas id="drift" class="chart" width="900" height="240"></canvas>
+        <div class="legend"><span><i class="swatch" style="background:var(--cyan)"></i>X error</span>
+          <span><i class="swatch" style="background:#f72585"></i>Y error</span></div>
+      </div>
+      <div class="panel">
+        <h2>Recent error bullseye</h2>
+        <canvas id="bullseye" class="chart" width="440" height="240"></canvas>
+        <div class="legend">Last 100 selected-object centroid positions relative to frame center</div>
+      </div>
+    </section>
+    <section id="encoderCharts" class="encoder-charts" hidden>
+      <div class="panel">
+        <h2>Encoder following error</h2>
+        <canvas id="encoderError" class="chart" width="700" height="240"></canvas>
+        <div class="legend"><span><i class="swatch" style="background:var(--cyan)"></i>AZ target − encoder</span><span><i class="swatch" style="background:#f72585"></i>EL target − encoder</span></div>
+      </div>
+      <div class="panel">
+        <h2>Five-second encoder error range</h2>
+        <canvas id="periodError" class="chart" width="700" height="240"></canvas>
+        <div class="legend">Signed minimum/maximum per axis. Positive means encoder behind the positive target direction; negative means ahead.</div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const video = document.getElementById('video');
+    const overlay = document.getElementById('overlay');
+    const ctx = overlay.getContext('2d');
+    const drift = document.getElementById('drift');
+    const driftCtx = drift.getContext('2d');
+    const bullseye = document.getElementById('bullseye');
+    const bullCtx = bullseye.getContext('2d');
+    const history = [];
+    const encoderHistory = [];
+    let state = null;
+    let socket;
+    let roiStart=null,roiCurrent=null;
+
+    function send(message) {
+      if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+    }
+    function fmt(value, suffix='') { return value == null ? '—' : Number(value).toFixed(2) + suffix; }
+
+    function connect() {
+      socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+      socket.onopen = () => setSocket('CONNECTED', true);
+      socket.onclose = () => { setSocket('DISCONNECTED', false); setTimeout(connect, 1500); };
+      socket.onerror = () => setSocket('ERROR', false);
+      socket.onmessage = event => {
+        const data = JSON.parse(event.data);
+        if (data.event === 'command_error') { document.getElementById('message').textContent = data.message; return; }
+        update(data);
+      };
+    }
+    function setSocket(text, good) {
+      const badge = document.getElementById('socketBadge'); badge.textContent = text;
+      badge.className = `badge ${good ? 'locked' : 'lost'}`;
+    }
+
+    function update(data) {
+      state = data;
+      const live=data.ui_mode==='live';document.body.className=live?'live-mode':'demo-mode';
+      document.getElementById('modeBannerTitle').textContent=live?'LIVE MODE — REAL CAMERA / REAL TELESCOPE':'DEMO MODE — SYNTHETIC TARGET / TEST CONTROLS';
+      document.getElementById('modeBannerText').textContent=live?'Click a real image feature, then use RESUME / ON to command the connected mount.':'Synthetic evaluation only. Return to LIVE MODE before attempting optical tracking.';
+      document.getElementById('modeWatermark').textContent=live?'LIVE CAMERA':'DEMO — SYNTHETIC IMAGE';
+      document.getElementById('videoHelp').textContent=live?'Click a high-contrast point to create a fixed-size feature lock.':'Click a bounding box to select it. Amber boxes are available objects; the selected object is green.';
+      document.getElementById('liveMode').className=live?'active':'';document.getElementById('demoMode').className=live?'':'active';
+      document.getElementById('message').textContent = data.error || '';
+      const trackingMode=document.getElementById('trackingMode'),featureAlgorithm=document.getElementById('featureAlgorithm'),lockRoiSize=document.getElementById('lockRoiSize');if(!trackingMode.dataset.pending)trackingMode.value=data.tracking_mode||'threshold';if(!featureAlgorithm.dataset.pending)featureAlgorithm.value=data.feature_algorithm||'CSRT';if(!lockRoiSize.dataset.pending)lockRoiSize.checked=data.feature_lock_size!==false;featureAlgorithm.disabled=data.tracking_mode!=='feature-roi'||data.hardware_loop?.enabled;lockRoiSize.disabled=data.tracking_mode!=='feature-roi'||data.hardware_loop?.enabled;document.getElementById('trackingModeButton').disabled=Boolean(data.hardware_loop?.enabled);document.getElementById('featureHelp').textContent=data.tracking_mode==='feature-roi'?'Feature ROI mode: drag a box around a crater or texture. ROI size lock is recommended; moderate rotation tolerance, large field rotation may require reacquisition.':'Thresholded objects mode: click a detected bounding box.';
+      const badge = document.getElementById('trackBadge');
+      badge.textContent = data.state; badge.className = `badge ${String(data.state).toLowerCase()}`;
+      document.getElementById('selected').textContent = data.selected_track_id ?? '—';
+      document.getElementById('count').textContent = data.objects.length;
+      document.getElementById('dx').textContent = fmt(data.error_x_px, ' px');
+      document.getElementById('dy').textContent = fmt(data.error_y_px, ' px');
+      document.getElementById('fps').textContent = fmt(data.capture_fps, ' FPS');
+      document.getElementById('latency').textContent = fmt(data.processing_ms, ' ms');
+      document.getElementById('frame').textContent = data.frame;
+      document.getElementById('recordPath').textContent = data.record_path || '—';
+      document.getElementById('recording').checked = Boolean(data.recording);
+      const hil=data.hardware_loop||{available:false,enabled:false};
+      const linkPending=Boolean(hil.link_action_pending);const motorOn=document.getElementById('motorOn'),motorOff=document.getElementById('motorOff'),pilot=document.getElementById('motorPilot');motorOn.disabled=!hil.available||linkPending;motorOff.disabled=!hil.available;motorOn.className=hil.enabled?'active-on':'';motorOff.className=hil.enabled?'':'active-off';pilot.className=`pilot ${hil.enabled?'green':(linkPending||hil.available&&hil.connection!=='live'?'amber':'')}`;document.getElementById('motorStateText').textContent=linkPending?'RECONNECTING MOTOR LINK':(hil.enabled?'ARMED — MOVING':(hil.available&&hil.connection!=='live'?'PRESS ON TO RECONNECT':'DISARMED'));
+      const cal=data.orientation_calibration||hil.orientation_calibration||{},softRunning=cal.status==='running';
+      const liveOn=document.getElementById('liveMotorOn'),liveOff=document.getElementById('liveMotorOff'),livePilot=document.getElementById('liveMotorPilot');liveOn.disabled=!hil.available||data.selected_track_id==null||softRunning||linkPending;liveOff.disabled=!hil.available;liveOn.className=hil.enabled?'active-on':'';liveOff.className=hil.enabled?'':'active-off';livePilot.className=`pilot ${hil.enabled?'green':(linkPending||softRunning||hil.available&&hil.connection!=='live'?'amber':'')}`;document.getElementById('liveMotorState').textContent=linkPending?'RECONNECTING MOTOR LINK':(softRunning?'SOFT START — MOVING':(hil.enabled?(data.state==='LOCKED'?'ARMED — TRACKING':'ARMED — MOTION FROZEN; TARGET LOST'):(hil.available&&hil.connection!=='live'?'PRESS RESUME / ON TO RECONNECT':'MOTOR LINK READY — AWAITING MOTION REQUEST')));
+      const orientationStep=document.getElementById('orientationStep'),orientationRate=document.getElementById('orientationRate');orientationStep.disabled=orientationRate.disabled=hil.enabled||softRunning||linkPending;if(!orientationRate.dataset.pending&&cal.slew_rate)orientationRate.value=String(cal.slew_rate);const learnOrientation=document.getElementById('learnOrientation'),clearOrientation=document.getElementById('clearOrientation');learnOrientation.disabled=!hil.available||data.selected_track_id==null||hil.enabled||softRunning||linkPending;clearOrientation.disabled=hil.enabled||softRunning||linkPending;document.getElementById('orientationStatus').textContent=linkPending?`Motor link reconnecting; ${hil.link_action_pending==='learn'?'mapping will start automatically after both encoders reply.':'tracking will start automatically after both encoders reply.'}`:`${cal.status||'not learned'}: ${cal.message||'Lock a stable feature, then run soft start.'}${cal.encoder_delta_counts?` Encoder deltas AZ ${cal.encoder_delta_counts[0]}, EL ${cal.encoder_delta_counts[1]}.`:''}`;
+      const vf=hil.vibration_filter||{},vibrationEnabled=document.getElementById('vibrationEnabled'),vibrationThreshold=document.getElementById('vibrationThreshold');if(!vibrationEnabled.dataset.pending)vibrationEnabled.checked=Boolean(vf.enabled);if(!vibrationThreshold.dataset.pending&&vf.threshold_px!=null)vibrationThreshold.value=vf.threshold_px;[vibrationEnabled,vibrationThreshold,document.getElementById('vibrationApply'),document.getElementById('liveLossMode'),document.getElementById('liveLossTime'),document.getElementById('liveLossApply')].forEach(e=>e.disabled=hil.enabled||softRunning);if(!document.getElementById('liveLossMode').dataset.pending&&hil.loss_mode)document.getElementById('liveLossMode').value=hil.loss_mode;if(!document.getElementById('liveLossTime').dataset.pending&&hil.coast_seconds)document.getElementById('liveLossTime').value=String(hil.coast_seconds);
+      const envelopeEnabled=document.getElementById('travelEnvelopeEnabled'),envelopeDegrees=document.getElementById('travelEnvelopeDegrees');if(!envelopeEnabled.dataset.pending)envelopeEnabled.checked=Boolean(hil.travel_envelope_enabled);if(!envelopeDegrees.dataset.pending&&hil.envelope_degrees>0)envelopeDegrees.value=hil.envelope_degrees;[envelopeEnabled,envelopeDegrees,document.getElementById('travelEnvelopeApply')].forEach(e=>e.disabled=hil.enabled||softRunning);
+      const hilRate=document.getElementById('hilRate'); hilRate.disabled=!hil.available||hil.enabled; document.getElementById('hilRateButton').disabled=!hil.available||hil.enabled; if(hil.dispatch_rate_hz&&!hilRate.dataset.pending)hilRate.value=String(hil.dispatch_rate_hz);
+      const hilSpan=document.getElementById('hilSpan'); hilSpan.disabled=!hil.available||hil.enabled; document.getElementById('hilSpanButton').disabled=!hil.available||hil.enabled; if(hil.display_span_degrees&&!hilSpan.dataset.pending)hilSpan.value=String(hil.display_span_degrees);
+      const hilLoss=document.getElementById('hilLossMode'),hilCoast=document.getElementById('hilCoast'); hilLoss.disabled=!hil.available||hil.enabled; hilCoast.disabled=!hil.available||hil.enabled||hilLoss.value==='stop'; document.getElementById('hilLossButton').disabled=!hil.available||hil.enabled; if(hil.loss_mode&&!hilLoss.dataset.pending)hilLoss.value=hil.loss_mode;if(hil.coast_seconds&&!hilCoast.dataset.pending)hilCoast.value=String(hil.coast_seconds);
+      const preset=document.getElementById('controlPreset'),horizon=document.getElementById('predictionHorizon'),lead=document.getElementById('proportionalLead'),deadband=document.getElementById('correctionDeadband');if(!preset.dataset.pending&&hil.control_preset)preset.value=hil.control_preset;if(!horizon.dataset.pending&&hil.prediction_horizon_seconds!=null)horizon.value=Number(hil.prediction_horizon_seconds).toFixed(2);if(!lead.dataset.pending&&hil.proportional_lead!=null)lead.value=Number(hil.proportional_lead).toFixed(2);if(!deadband.dataset.pending&&hil.correction_deadband_degrees!=null)deadband.value=Number(hil.correction_deadband_degrees).toFixed(2);[preset,horizon,lead,deadband].forEach(e=>e.disabled=!hil.available||hil.enabled);document.getElementById('controlPresetButton').disabled=!hil.available||hil.enabled;
+      const blink=data.synthetic_blink||{},blinkEnabled=document.getElementById('blinkEnabled'); ['blinkEnabled','fadeOut','hiddenTime','fadeIn','blinkPeriod','blinkButton'].forEach(id=>document.getElementById(id).disabled=hil.enabled); if(!blinkEnabled.dataset.pending)blinkEnabled.checked=Boolean(blink.enabled); document.getElementById('blinkStatus').textContent=blink.enabled?`Blink test: ${blink.phase}; grayscale intensity ${blink.intensity}; detector threshold ${data.threshold}.`:'Synthetic blink test disabled.';
+      const motorBadge=document.getElementById('motorBadge'); motorBadge.textContent=softRunning?'SOFT START — TELESCOPE MOVING':(hil.enabled?'MOTOR OUTPUT ARMED':(hil.available&&hil.connection==='live'?'MOTOR LINK READY':'MOTOR LINK UNAVAILABLE')); motorBadge.className=`badge ${hil.enabled?'motor-on':(softRunning||hil.available&&hil.connection==='live'?'':'error')}`;
+      const targetRate=hil.target_rate?` target rate AZ ${hil.target_rate.azimuth_deg_s.toFixed(2)}°/s, EL ${hil.target_rate.elevation_deg_s.toFixed(2)}°/s;`:'';
+      document.getElementById('hilDetails').textContent=hil.available ? `Hardware-loop test: ${hil.connection||'unknown'}; Encoder Reported Location follows real replies; ${hil.display_span_degrees}° display span; ±${hil.envelope_degrees}° hard envelope;${targetRate} outer loop ${hil.control_preset||'off'} (lead ${Number(hil.prediction_horizon_seconds||0).toFixed(2)}s, P ${Number(hil.proportional_lead||0).toFixed(2)}, deadband ${Number(hil.correction_deadband_degrees||0).toFixed(2)}°); ${hil.dispatch_rate_hz} Hz requested; ${hil.last_achieved_cycle_rate_hz?hil.last_achieved_cycle_rate_hz.toFixed(2)+' Hz achieved':'waiting for cycle timing'}; ${hil.cycle_overruns||0} overruns. ${hil.error||hil.rate_warning||'Synthetic image is not optical feedback.'}` : hil.description;
+      document.getElementById('evaluationNotice').textContent=!hil.available?'Display-only mode; motor output is unavailable.':softRunning?'SOFT START ACTIVE — the telescope is making bounded physical probe movements. Press OFF to cancel.':hil.enabled?'MOTOR OUTPUT ARMED — the telescope is physically moving in a supervised hardware-in-the-loop test.':'Motor link is ready. Select a target, then Learn / validate or RESUME / ON; the app verifies fresh feedback and starts the bounded mapping probe.';
+      const bridge=hil.bridge||{},bridgeRestarting=Boolean(bridge.service_restart_in_progress);document.getElementById('bridgeManagement').textContent=bridge.verified_proxy?'Verified software proxy':(bridge.management_reachable?'Responding, identity unverified':'Unavailable');document.getElementById('bridgeReady').textContent=bridgeRestarting?'Restarting':(bridge.ready===true?'Ready':(bridge.ready===false?'Not ready':'Unknown'));document.getElementById('bridgeData').textContent=bridge.dashboard_connection||'not configured';document.getElementById('bridgeReconnects').textContent=`Motor-link manual ${bridge.dashboard_manual_reconnects??0}; automatic ${bridge.dashboard_reconnections??0}; Bridge restarts ${bridge.service_restart_count??0}`;const cached=bridge.cached_positions||{},ages=Object.values(cached).map(v=>Number(v.age_seconds)).filter(Number.isFinite);document.getElementById('bridgeFeedback').textContent=ages.length?`Newest ${Math.min(...ages).toFixed(2)} s; oldest ${Math.max(...ages).toFixed(2)} s`:'No cached replies';document.getElementById('bridgeError').textContent=bridge.dashboard_last_error||'None';document.getElementById('bridgeMessage').textContent=bridge.service_restart_result||bridge.message||'No Bridge management report.';document.getElementById('reconnectBridge').disabled=!hil.available||bridgeRestarting;document.getElementById('restartBridge').disabled=!hil.available||bridgeRestarting;
+      document.getElementById('liveTargetState').textContent=data.state||'—';document.getElementById('liveDx').textContent=fmt(data.error_x_px,' px');document.getElementById('liveDy').textContent=fmt(data.error_y_px,' px');document.getElementById('liveFps').textContent=fmt(data.capture_fps,' FPS');document.getElementById('liveLink').textContent=hil.connection||'unavailable';document.getElementById('liveCamera').textContent=data.camera_device||'—';document.getElementById('liveMessage').textContent=data.error||hil.error||(data.feature_reacquiring?'Original feature is not credible. Motor corrections are frozen while the app waits for two consistent matches to the original feature.':data.selected_track_id==null?'Click a high-contrast feature to create a lock.':hil.enabled?'Tracking output is ON.':'Target locked; press Learn / validate or RESUME / ON to start motion.');
+      const cameraAuto=data.camera_auto||{},cameraLimits=cameraAuto.limits||{},autoExposure=document.getElementById('autoExposure'),exposureValue=document.getElementById('exposureValue'),manualExposure=document.getElementById('manualExposure'),manualGain=document.getElementById('manualGain');const applyCameraLimit=(element,label,limit,fallback)=>{const minimum=limit?.minimum??fallback[0],maximum=limit?.maximum??fallback[1];element.min=minimum;element.max=maximum;label.textContent=`(${minimum} to ${maximum})`;};applyCameraLimit(exposureValue,document.getElementById('exposureValueRange'),cameraLimits.ExposureValue,[-4,4]);applyCameraLimit(manualExposure,document.getElementById('manualExposureRange'),cameraLimits.ExposureTime,[100,1000000]);applyCameraLimit(manualGain,document.getElementById('manualGainRange'),cameraLimits.AnalogueGain,[1,32]);if(!autoExposure.dataset.pending)autoExposure.checked=cameraAuto.enabled!==false;if(!exposureValue.dataset.pending&&cameraAuto.exposure_value!=null)exposureValue.value=cameraAuto.exposure_value;if(!manualExposure.dataset.pending&&cameraAuto.manual_exposure_time_us)manualExposure.value=cameraAuto.manual_exposure_time_us;if(!manualGain.dataset.pending&&cameraAuto.manual_analogue_gain)manualGain.value=cameraAuto.manual_analogue_gain;[autoExposure,exposureValue,manualExposure,manualGain].forEach(e=>e.disabled=!cameraAuto.available||hil.enabled);manualExposure.disabled=manualGain.disabled=!cameraAuto.available||hil.enabled||autoExposure.checked;document.getElementById('applyExposure').disabled=!cameraAuto.available||hil.enabled;document.getElementById('liveExposure').textContent=cameraAuto.exposure_time_us?`${cameraAuto.exposure_time_us} µs${cameraAuto.enabled?' auto':' manual'}`:'—';document.getElementById('liveGain').textContent=cameraAuto.analogue_gain!=null?Number(cameraAuto.analogue_gain).toFixed(2):'—';document.getElementById('liveFocus').textContent=data.focus_score!=null?Number(data.focus_score).toFixed(1):'—';
+      const curve=data.image_curve||{},curveBlack=document.getElementById('curveBlack'),curveWhite=document.getElementById('curveWhite'),curveGamma=document.getElementById('curveGamma');if(!curveBlack.dataset.pending&&curve.black!=null)curveBlack.value=curve.black;if(!curveWhite.dataset.pending&&curve.white!=null)curveWhite.value=curve.white;if(!curveGamma.dataset.pending&&curve.gamma!=null)curveGamma.value=curve.gamma;[curveBlack,curveWhite,curveGamma].forEach(e=>e.disabled=hil.enabled);document.getElementById('applyCurve').disabled=hil.enabled;document.getElementById('curveSummary').textContent=`Black ${curveBlack.value}; white ${curveWhite.value}; gamma ${Number(curveGamma.value).toFixed(2)}.`;
+      const aim=document.getElementById('aimMode');if(!aim.dataset.pending)aim.value=data.aim_mode||'center';
+      const vectorText=v=>{if(!Array.isArray(v)||v.length<2)return'Not measured';const dx=Number(v[0]),dy=Number(v[1]);return `${dx>=0?'Right':'Left'} ${Math.abs(dx).toFixed(1)} px; ${dy>=0?'Down':'Up'} ${Math.abs(dy).toFixed(1)} px`;};document.getElementById('azimuthMapping').textContent=vectorText(cal.azimuth_vector_px);document.getElementById('elevationMapping').textContent=vectorText(cal.elevation_vector_px);document.getElementById('mappingSource').textContent=cal.valid?'Measured encoder and pixel response':'No valid measured mapping';
+      updateCameras(data.cameras||[],data.camera_device,data.camera_settings);
+      const encoderLive=hil.connection==='live'&&hil.marker&&hil.encoder_error;
+      document.getElementById('encoderCharts').hidden=!encoderLive;
+      if(encoderLive){encoderHistory.push({t:data.monotonic_ns/1e9,az:hil.encoder_error.azimuth_degrees,el:hil.encoder_error.elevation_degrees});while(encoderHistory.length>4000)encoderHistory.shift();}
+      document.getElementById('threshold').value = data.threshold;
+      document.getElementById('polarity').value = data.polarity || 'bright';
+      updateObjectSelector(data.objects, data.selected_track_id);
+      if (data.error_x_px != null && data.error_y_px != null) {
+        history.push({t:data.monotonic_ns / 1e9, x:data.error_x_px, y:data.error_y_px,
+                      id:data.selected_track_id});
+        while (history.length > 2000) history.shift();
+      }
+      drawOverlay(); drawCharts(); drawEncoderCharts();
+    }
+
+    function updateCameras(cameras,currentDevice,currentSetting){
+      const camera=document.getElementById('cameraSelect'),signature=cameras.map(c=>`${c.device}:${c.settings.length}`).join('|');
+      if(camera.dataset.signature!==signature){camera.innerHTML=cameras.length?'':'<option value="">No V4L2 capture cameras found</option>';cameras.forEach(c=>{const o=document.createElement('option');o.value=c.device;o.textContent=`${c.name} — ${c.device}`;camera.appendChild(o);});camera.dataset.signature=signature;}
+      if(cameras.some(c=>c.device===currentDevice)&&!camera.dataset.pending)camera.value=currentDevice;
+      const selected=cameras.find(c=>c.device===camera.value),setting=document.getElementById('cameraSetting'),settingSignature=selected?`${selected.device}:${selected.settings.map(s=>`${s.width}x${s.height}@${s.fps}`).join(',')}`:'';
+      if(setting.dataset.signature!==settingSignature){setting.innerHTML=selected?'':'<option value="">Select a camera</option>';if(selected)selected.settings.forEach(s=>{const o=document.createElement('option');o.value=JSON.stringify(s);o.textContent=`${s.width} × ${s.height} @ ${s.fps.toFixed(2)} FPS`;setting.appendChild(o);});setting.dataset.signature=settingSignature;}
+      if(selected&&currentSetting&&!setting.dataset.pending){const match=[...setting.options].find(o=>{const s=JSON.parse(o.value);return s.width===currentSetting.width&&s.height===currentSetting.height&&Math.abs(s.fps-currentSetting.fps)<.01;});if(match)setting.value=match.value;}
+      [camera,setting,document.getElementById('refreshCameras'),document.getElementById('applyCamera'),document.getElementById('aimMode'),document.getElementById('liveBoxSize')].forEach(e=>e.disabled=Boolean(state?.hardware_loop?.enabled));
+    }
+
+    function updateObjectSelector(objects, selectedId) {
+      const select = document.getElementById('objectSelect');
+      const current = select.value;
+      const signature = objects.map(o => o.track_id).join(',');
+      if (select.dataset.signature !== signature) {
+        select.innerHTML = objects.length ? '' : '<option value="">No visible objects</option>';
+        objects.forEach(object => {
+          const option = document.createElement('option'); option.value = object.track_id;
+          option.textContent = `Object ${object.track_id} — confidence ${(object.confidence*100).toFixed(0)}%, area ${object.area.toFixed(0)} px`;
+          select.appendChild(option);
+        });
+        select.dataset.signature = signature;
+        if ([...select.options].some(o => o.value === current)) select.value = current;
+      }
+      if (selectedId != null && [...select.options].some(o => Number(o.value) === selectedId)) select.value = selectedId;
+    }
+
+    function drawOverlay() {
+      if (!state) return;
+      if (overlay.width !== state.width || overlay.height !== state.height) {
+        overlay.width = state.width; overlay.height = state.height;
+      }
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      const cx=(state.aim_point?.x??.5)*overlay.width, cy=(state.aim_point?.y??.5)*overlay.height;
+      ctx.strokeStyle='#ffffffaa'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(cx-18,cy); ctx.lineTo(cx+18,cy); ctx.moveTo(cx,cy-18); ctx.lineTo(cx,cy+18); ctx.stroke();
+      state.objects.forEach(object => {
+        const [x,y,w,h]=object.bbox; const selected=object.track_id===state.selected_track_id;
+        ctx.strokeStyle=selected?'#4ee38a':'#ffc857'; ctx.fillStyle=ctx.strokeStyle; ctx.lineWidth=selected?3:2;
+        ctx.strokeRect(x,y,w,h); ctx.font='bold 14px system-ui'; ctx.fillText(`ID ${object.track_id}`,x,Math.max(14,y-4));
+        ctx.beginPath(); ctx.moveTo(object.x-6,object.y); ctx.lineTo(object.x+6,object.y);
+        ctx.moveTo(object.x,object.y-6); ctx.lineTo(object.x,object.y+6); ctx.stroke();
+        if (selected && state.ui_mode!=='live') { ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(object.x,object.y); ctx.stroke(); }
+      });
+      if(roiStart&&roiCurrent){ctx.strokeStyle='#4cc9f0';ctx.lineWidth=2;ctx.setLineDash([6,4]);ctx.strokeRect(Math.min(roiStart.x,roiCurrent.x),Math.min(roiStart.y,roiCurrent.y),Math.abs(roiCurrent.x-roiStart.x),Math.abs(roiCurrent.y-roiStart.y));ctx.setLineDash([]);}
+      const marker=state.hardware_loop?.marker;
+      if(marker){ctx.strokeStyle='#4cc9f0';ctx.fillStyle='#4cc9f0';ctx.lineWidth=3;ctx.beginPath();ctx.arc(marker.x,marker.y,14,0,Math.PI*2);ctx.stroke();ctx.font='bold 14px system-ui';ctx.fillText('Encoder Reported Location',marker.x+18,marker.y+5);}
+    }
+
+    function axes(context, canvas, scale, label) {
+      context.clearRect(0,0,canvas.width,canvas.height); context.fillStyle='#101820'; context.fillRect(0,0,canvas.width,canvas.height);
+      context.strokeStyle='#334454'; context.lineWidth=1;
+      for(let i=1;i<4;i++){ const y=i*canvas.height/4; context.beginPath();context.moveTo(0,y);context.lineTo(canvas.width,y);context.stroke(); }
+      context.strokeStyle='#718597'; context.beginPath();context.moveTo(0,canvas.height/2);context.lineTo(canvas.width,canvas.height/2);context.stroke();
+      context.fillStyle='#9db0c0';context.font='12px system-ui';context.fillText(`±${scale.toFixed(1)} px ${label||''}`,8,16);
+    }
+    function drawCharts() {
+      const now=history.length?history[history.length-1].t:0;
+      const seconds=Number(document.getElementById('windowSeconds').value);
+      const visible=history.filter(p=>p.t>=now-seconds);
+      const scale=Math.max(10,...visible.flatMap(p=>[Math.abs(p.x),Math.abs(p.y)]))*1.1;
+      axes(driftCtx,drift,scale,`${seconds}s window`);
+      function line(key,color){ driftCtx.strokeStyle=color;driftCtx.lineWidth=2;driftCtx.beginPath();
+        visible.forEach((p,i)=>{const x=drift.width*(p.t-(now-seconds))/seconds;const y=drift.height/2-p[key]/scale*drift.height*.45;i?driftCtx.lineTo(x,y):driftCtx.moveTo(x,y);});driftCtx.stroke(); }
+      if(visible.length){line('x','#4cc9f0');line('y','#f72585');}
+
+      const recent=history.slice(-100); const bullScale=Math.max(10,...recent.flatMap(p=>[Math.abs(p.x),Math.abs(p.y)]))*1.1;
+      axes(bullCtx,bullseye,bullScale,'bullseye'); const bx=bullseye.width/2,by=bullseye.height/2;
+      bullCtx.strokeStyle='#718597'; [0.25,0.5,0.9].forEach(r=>{bullCtx.beginPath();bullCtx.arc(bx,by,Math.min(bx,by)*r,0,Math.PI*2);bullCtx.stroke();});
+      recent.forEach((p,i)=>{bullCtx.fillStyle=`rgba(78,227,138,${.25+.75*(i+1)/Math.max(1,recent.length)})`;
+        bullCtx.beginPath();bullCtx.arc(bx+p.x/bullScale*bx*.9,by+p.y/bullScale*by*.9,2.5,0,Math.PI*2);bullCtx.fill();});
+    }
+
+    function drawEncoderCharts(){
+      if(!encoderHistory.length||document.getElementById('encoderCharts').hidden)return;
+      const canvas=document.getElementById('encoderError'),context=canvas.getContext('2d');
+      const period=document.getElementById('periodError'),periodCtx=period.getContext('2d');
+      const now=encoderHistory[encoderHistory.length-1].t,seconds=Number(document.getElementById('windowSeconds').value);
+      const visible=encoderHistory.filter(p=>p.t>=now-seconds);
+      const scale=Math.max(.01,...visible.flatMap(p=>[Math.abs(p.az),Math.abs(p.el)]))*1.1;
+      axes(context,canvas,scale,`${seconds}s; degrees`);
+      function line(key,color){context.strokeStyle=color;context.lineWidth=2;context.beginPath();visible.forEach((p,i)=>{const x=canvas.width*(p.t-(now-seconds))/seconds,y=canvas.height/2-p[key]/scale*canvas.height*.45;i?context.lineTo(x,y):context.moveTo(x,y);});context.stroke();}
+      line('az','#4cc9f0');line('el','#f72585');
+      const bins=[];for(let start=now-60;start<now;start+=5){const points=encoderHistory.filter(p=>p.t>=start&&p.t<start+5);if(points.length)bins.push({start,azMin:Math.min(...points.map(p=>p.az)),azMax:Math.max(...points.map(p=>p.az)),elMin:Math.min(...points.map(p=>p.el)),elMax:Math.max(...points.map(p=>p.el))});}
+      const rangeScale=Math.max(.01,...bins.flatMap(b=>[Math.abs(b.azMin),Math.abs(b.azMax),Math.abs(b.elMin),Math.abs(b.elMax)]))*1.1;axes(periodCtx,period,rangeScale,'5s ranges; degrees');
+      bins.forEach((b,i)=>{const x=(i+.5)*period.width/Math.max(1,bins.length);[['azMin','azMax','#4cc9f0',-3],['elMin','elMax','#f72585',3]].forEach(([lo,hi,color,offset])=>{periodCtx.strokeStyle=color;periodCtx.lineWidth=4;periodCtx.beginPath();periodCtx.moveTo(x+offset,period.height/2-b[lo]/rangeScale*period.height*.45);periodCtx.lineTo(x+offset,period.height/2-b[hi]/rangeScale*period.height*.45);periodCtx.stroke();});});
+    }
+
+    overlay.addEventListener('click', event => {
+      const rect=overlay.getBoundingClientRect();
+      if(state?.ui_mode==='live'){if(state.hardware_loop?.enabled)return;send({action:'set_aim_mode',mode:document.getElementById('aimMode').value});send({action:'set_feature_point',x:(event.clientX-rect.left)/rect.width,y:(event.clientY-rect.top)/rect.height,box_fraction:Number(document.getElementById('liveBoxSize').value)});return;}
+      if(state?.tracking_mode==='feature-roi')return;
+      send({action:'select_at',x:(event.clientX-rect.left)/rect.width,y:(event.clientY-rect.top)/rect.height});
+    });
+    overlay.addEventListener('mousedown',event=>{if(state?.ui_mode==='live'||state?.tracking_mode!=='feature-roi')return;const r=overlay.getBoundingClientRect();roiStart={x:(event.clientX-r.left)/r.width*overlay.width,y:(event.clientY-r.top)/r.height*overlay.height};roiCurrent={...roiStart};});
+    overlay.addEventListener('mousemove',event=>{if(!roiStart)return;const r=overlay.getBoundingClientRect();roiCurrent={x:(event.clientX-r.left)/r.width*overlay.width,y:(event.clientY-r.top)/r.height*overlay.height};drawOverlay();});
+    overlay.addEventListener('mouseup',event=>{if(!roiStart||!roiCurrent)return;const x=Math.min(roiStart.x,roiCurrent.x),y=Math.min(roiStart.y,roiCurrent.y),w=Math.abs(roiCurrent.x-roiStart.x),h=Math.abs(roiCurrent.y-roiStart.y);roiStart=roiCurrent=null;if(w>=5&&h>=5)send({action:'set_feature_roi',x:x/overlay.width,y:y/overlay.height,width:w/overlay.width,height:h/overlay.height});drawOverlay();});
+    document.getElementById('selectButton').onclick=()=>{const v=document.getElementById('objectSelect').value;if(v)send({action:'select_track',track_id:Number(v)});};
+    document.getElementById('trackingMode').onchange=e=>{e.target.dataset.pending='1';const feature=e.target.value==='feature-roi';document.getElementById('featureAlgorithm').disabled=!feature;document.getElementById('lockRoiSize').disabled=!feature;};
+    document.getElementById('featureAlgorithm').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('lockRoiSize').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('trackingModeButton').onclick=()=>{const m=document.getElementById('trackingMode'),a=document.getElementById('featureAlgorithm'),l=document.getElementById('lockRoiSize');send({action:'set_tracking_mode',mode:m.value,algorithm:a.value,lock_size:l.checked});delete m.dataset.pending;delete a.dataset.pending;delete l.dataset.pending;};
+    document.getElementById('clearButton').onclick=()=>send({action:'clear_selection'});
+    document.getElementById('thresholdButton').onclick=()=>send({action:'set_threshold',value:Number(document.getElementById('threshold').value)});
+    document.getElementById('polarityButton').onclick=()=>send({action:'set_polarity',value:document.getElementById('polarity').value});
+    document.getElementById('recording').onchange=e=>send({action:'set_recording',enabled:e.target.checked});
+    document.getElementById('motorOn').onclick=()=>send({action:'set_hil_enabled',enabled:true});
+    document.getElementById('motorOff').onclick=()=>send({action:'set_hil_enabled',enabled:false});
+    document.getElementById('liveMotorOn').onclick=()=>send({action:'set_hil_enabled',enabled:true});
+    document.getElementById('liveMotorOff').onclick=()=>send({action:'set_hil_enabled',enabled:false});
+    document.getElementById('orientationRate').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('learnOrientation').onclick=()=>{const step=Number(document.getElementById('orientationStep').value),rate=Number(document.getElementById('orientationRate').value);if(confirm(`The telescope will probe both axes by ${step}° at slew level ${rate} and return. Confirm clear travel and continue?`))send({action:'start_orientation_learning',step,rate});};
+    document.getElementById('clearOrientation').onclick=()=>{if(confirm('Clear the saved camera-to-mount mapping for this camera, resolution, and telescope?'))send({action:'clear_orientation_profile'});};
+    document.getElementById('vibrationEnabled').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('vibrationThreshold').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('vibrationApply').onclick=()=>{const e=document.getElementById('vibrationEnabled'),t=document.getElementById('vibrationThreshold');send({action:'set_vibration_filter',enabled:e.checked,threshold_px:Number(t.value)});delete e.dataset.pending;delete t.dataset.pending;};
+    document.getElementById('liveLossMode').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('liveLossTime').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('liveLossApply').onclick=()=>{const m=document.getElementById('liveLossMode'),t=document.getElementById('liveLossTime');send({action:'set_hil_loss_behavior',mode:m.value,coast_seconds:Number(t.value)});delete m.dataset.pending;delete t.dataset.pending;};
+    document.getElementById('travelEnvelopeEnabled').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('travelEnvelopeDegrees').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('travelEnvelopeApply').onclick=()=>{const e=document.getElementById('travelEnvelopeEnabled'),d=document.getElementById('travelEnvelopeDegrees');send({action:'set_hil_travel_envelope',enabled:e.checked,degrees:Number(d.value)});delete e.dataset.pending;delete d.dataset.pending;};
+    document.getElementById('liveMode').onclick=()=>{if(!state?.hardware_loop?.enabled)send({action:'set_operating_mode',mode:'live'});};
+    document.getElementById('demoMode').onclick=()=>{if(!state?.hardware_loop?.enabled)send({action:'set_operating_mode',mode:'demo'});};
+    document.getElementById('aimMode').onchange=e=>{e.target.dataset.pending='1';send({action:'set_aim_mode',mode:e.target.value});delete e.target.dataset.pending;};
+    document.getElementById('liveClear').onclick=()=>send({action:'clear_selection'});
+    document.getElementById('resetLiveView').onclick=()=>{history.length=0;encoderHistory.length=0;send({action:'reset_live_view'});};
+    document.getElementById('liveRecord').onclick=()=>send({action:'set_recording',enabled:!Boolean(state?.recording)});
+    document.getElementById('refreshCameras').onclick=()=>send({action:'refresh_cameras'});
+    document.getElementById('recoverCamera').onclick=()=>send({action:'recover_camera'});
+    document.getElementById('cameraSelect').onchange=e=>{e.target.dataset.pending='1';e.target.dataset.pending='';updateCameras(state?.cameras||[],e.target.value,null);};
+    document.getElementById('cameraSetting').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('applyCamera').onclick=()=>{const c=document.getElementById('cameraSelect'),s=document.getElementById('cameraSetting');if(!c.value||!s.value)return;const setting=JSON.parse(s.value);send({action:'set_camera',device:c.value,...setting});delete c.dataset.pending;delete s.dataset.pending;};
+    ['autoExposure','exposureValue','manualExposure','manualGain'].forEach(id=>document.getElementById(id).onchange=e=>{e.target.dataset.pending='1';if(id==='autoExposure'){document.getElementById('manualExposure').disabled=e.target.checked;document.getElementById('manualGain').disabled=e.target.checked;}});
+    document.getElementById('applyExposure').onclick=()=>{const a=document.getElementById('autoExposure'),e=document.getElementById('exposureValue'),t=document.getElementById('manualExposure'),g=document.getElementById('manualGain');send({action:'set_camera_exposure',automatic:a.checked,exposure_value:Number(e.value),exposure_time_us:Number(t.value),analogue_gain:Number(g.value)});[a,e,t,g].forEach(x=>delete x.dataset.pending);};
+    ['curveBlack','curveWhite','curveGamma'].forEach(id=>document.getElementById(id).oninput=()=>{document.getElementById('curveSummary').textContent=`Black ${document.getElementById('curveBlack').value}; white ${document.getElementById('curveWhite').value}; gamma ${Number(document.getElementById('curveGamma').value).toFixed(2)}.`;document.getElementById(id).dataset.pending='1';});
+    document.getElementById('applyCurve').onclick=()=>{const b=document.getElementById('curveBlack'),w=document.getElementById('curveWhite'),g=document.getElementById('curveGamma');send({action:'set_image_curve',black:Number(b.value),white:Number(w.value),gamma:Number(g.value)});[b,w,g].forEach(x=>delete x.dataset.pending);};
+    document.getElementById('refreshBridge').onclick=()=>send({action:'refresh_bridge_status'});
+    document.getElementById('reconnectBridge').onclick=()=>send({action:'reconnect_bridge_client'});
+    document.getElementById('restartBridge').onclick=()=>send({action:'restart_bridge_service'});
+    document.getElementById('hilRate').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('hilRateButton').onclick=()=>{const e=document.getElementById('hilRate');send({action:'set_hil_dispatch_rate',value:Number(e.value)});delete e.dataset.pending;};
+    document.getElementById('hilSpan').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('hilSpanButton').onclick=()=>{const e=document.getElementById('hilSpan');send({action:'set_hil_display_span',value:Number(e.value)});delete e.dataset.pending;};
+    document.getElementById('hilLossMode').onchange=e=>{e.target.dataset.pending='1';document.getElementById('hilCoast').disabled=e.target.value==='stop'||e.target.disabled;};
+    document.getElementById('hilCoast').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('hilLossButton').onclick=()=>{const m=document.getElementById('hilLossMode'),c=document.getElementById('hilCoast');send({action:'set_hil_loss_behavior',mode:m.value,coast_seconds:Number(c.value)});delete m.dataset.pending;delete c.dataset.pending;};
+    ['controlPreset','predictionHorizon','proportionalLead','correctionDeadband'].forEach(id=>document.getElementById(id).onchange=e=>e.target.dataset.pending='1');
+    document.getElementById('controlPresetButton').onclick=()=>{const p=document.getElementById('controlPreset'),h=document.getElementById('predictionHorizon'),l=document.getElementById('proportionalLead'),d=document.getElementById('correctionDeadband');send({action:'set_hil_control_strategy',preset:p.value,horizon:Number(h.value),proportional:Number(l.value),deadband:Number(d.value)});delete p.dataset.pending;delete h.dataset.pending;delete l.dataset.pending;delete d.dataset.pending;};
+    document.getElementById('blinkEnabled').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('blinkButton').onclick=()=>{const e=document.getElementById('blinkEnabled');send({action:'set_synthetic_blink',enabled:e.checked,fade_out_seconds:Number(document.getElementById('fadeOut').value),hidden_seconds:Number(document.getElementById('hiddenTime').value),fade_in_seconds:Number(document.getElementById('fadeIn').value),period_seconds:Number(document.getElementById('blinkPeriod').value)});delete e.dataset.pending;};
+    document.getElementById('windowSeconds').onchange=drawCharts;
+    video.onload=drawOverlay; connect();
+  </script>
+</body>
+</html>

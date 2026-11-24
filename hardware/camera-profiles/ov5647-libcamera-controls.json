@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-11-23",
+  "camera": {
+    "sensor": "OV5647",
+    "libcamera_id_suffix": "ov5647@36",
+    "tuning_file": "/usr/share/libcamera/ipa/rpi/vc4/ov5647.json"
+  },
+  "test_environment": {
+    "computer": "Raspberry Pi 3B+",
+    "operating_system": "Raspberry Pi OS Trixie 32-bit",
+    "architecture": "armv7l",
+    "libcamera": "0.8.0+rpt20261104",
+    "capture_mode": "640x480 at requested 20 FPS"
+  },
+  "source": {
+    "api": "Picamera2(0).camera_controls",
+    "tuple_interpretation": [
+      "minimum",
+      "maximum",
+      "default"
+    ],
+    "notes": [
+      "These are values advertised by the installed libcamera driver for this physical camera.",
+      "Integer mode controls are enumerations; their numeric range does not document the meaning of every enum member.",
+      "Controls and ranges must be enumerated again when a different camera, driver, sensor mode, or operating-system image is used."
+    ]
+  },
+  "controls": {
+    "AeConstraintMode": {"minimum": 0, "maximum": 3, "default": 0},
+    "AeEnable": {"minimum": false, "maximum": true, "default": true},
+    "AeExposureMode": {"minimum": 0, "maximum": 3, "default": 0},
+    "AeFlickerMode": {"minimum": 0, "maximum": 1, "default": 0},
+    "AeFlickerPeriod": {"minimum": 100, "maximum": 1000000, "default": null, "unit": "microseconds"},
+    "AeMeteringMode": {"minimum": 0, "maximum": 3, "default": 0},
+    "AnalogueGain": {"minimum": 1.0, "maximum": 16.0, "default": 1.0, "unit": "multiplier"},
+    "AnalogueGainMode": {"minimum": 0, "maximum": 1, "default": 0},
+    "AwbEnable": {"minimum": false, "maximum": true, "default": null},
+    "AwbMode": {"minimum": 0, "maximum": 7, "default": 0},
+    "Brightness": {"minimum": -1.0, "maximum": 1.0, "default": 0.0},
+    "CnnEnableInputTensor": {"minimum": false, "maximum": true, "default": false},
+    "ColourCorrectionMatrix": {"minimum": 0.0, "maximum": 8.0, "default": null},
+    "ColourGains": {"minimum": 0.0, "maximum": 32.0, "default": null, "unit": "multiplier"},
+    "ColourTemperature": {"minimum": 100, "maximum": 100000, "default": null, "unit": "kelvin"},
+    "Contrast": {"minimum": 0.0, "maximum": 32.0, "default": 1.0},
+    "ExposureTime": {"minimum": 1, "maximum": 66666, "default": 20000, "unit": "microseconds"},
+    "ExposureTimeMode": {"minimum": 0, "maximum": 1, "default": 0},
+    "ExposureValue": {"minimum": -8.0, "maximum": 8.0, "default": 0.0, "unit": "EV"},
+    "FrameDurationLimits": {"minimum": 33333, "maximum": 250000000, "default": [33333, 33333], "unit": "microseconds"},
+    "HdrMode": {"minimum": 0, "maximum": 4, "default": 0},
+    "NoiseReductionMode": {"minimum": 0, "maximum": 4, "default": 0},
+    "Saturation": {"minimum": 0.0, "maximum": 32.0, "default": 1.0},
+    "ScalerCrop": {"minimum": [0, 0, 0, 0], "maximum": [65535, 65535, 65535, 65535], "default": [0, 0, 0, 0]},
+    "Sharpness": {"minimum": 0.0, "maximum": 16.0, "default": 1.0},
+    "StatsOutputEnable": {"minimum": false, "maximum": true, "default": false},
+    "SyncFrames": {"minimum": 100, "maximum": 100000, "default": 1000},
+    "SyncMode": {"minimum": 0, "maximum": 2, "default": 0}
+  },
+  "observed_automatic_state": {
+    "context": "Indoor garage ambient-light frame before the hardware-range query",
+    "ExposureTime": 49845,
+    "AnalogueGain": 8.0,
+    "DigitalGain": 1.0,
+    "unit_notes": {
+      "ExposureTime": "microseconds",
+      "AnalogueGain": "multiplier",
+      "DigitalGain": "multiplier"
+    }
+  },
+  "dashboard_limits_at_capture": {
+    "ExposureValue": {"minimum": -4.0, "maximum": 4.0},
+    "ExposureTime": {"minimum": 100, "maximum": 1000000, "unit": "microseconds"},
+    "AnalogueGain": {"minimum": 1.0, "maximum": 32.0},
+    "status": "Historical generic limits captured before correction. Runtime camera-control enumeration replaced these limits on 2026-11-23; this block is retained to document the resolved mismatch."
+  }
+}
