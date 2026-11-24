@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-PROJECT_DIR="${TELESCOPE_CONTROL_DIR:-$HOME/telescope-control}"
+PROJECT_DIR="${TELESCOPE_OPTICAL_TRACKING_CONTROL_DIR:-${TELESCOPE_CONTROL_DIR:-$HOME/telescope-optical-tracking-control}}"
 UNIT_SOURCE="$PROJECT_DIR/packaging/systemd/user/telescope-vision-dashboard.service"
 UNIT_TARGET="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 

@@ -378,8 +378,9 @@ class VisionDashboardEngine:
         self.soft_start_step_degrees = .5
         self.soft_start_slew_rate = 1
         self.soft_start_ramp_started = None
-        data_root = os.getenv('TELESCOPE_CONTROL_DATA_DIR', os.getenv(
-            'COSMOS90GT_DATA_DIR', Path.home() / '.telescope-control'))
+        data_root = os.getenv('TELESCOPE_OPTICAL_TRACKING_CONTROL_DATA_DIR', os.getenv(
+            'TELESCOPE_CONTROL_DATA_DIR', os.getenv(
+                'COSMOS90GT_DATA_DIR', Path.home() / '.telescope-optical-tracking-control')))
         self.orientation_profile_path = (Path(data_root) /
             'vision-orientation-profiles.json')
         self.bridge_status = {'management_reachable': False, 'verified_proxy': False,

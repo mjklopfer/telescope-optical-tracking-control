@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "telescope-control"
+name = "telescope-optical-tracking-control"
 version = "0.1.0"
-description = "Raspberry Pi visual telescope tracking and bounded Celestron AUX motor control"
+description = "Raspberry Pi telescope optical tracking and bounded Celestron AUX motor control"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -20,8 +20,8 @@ dev = ["ruff>=0.9,<1"]
 desktop-vision = ["numpy>=1.24", "opencv-contrib-python>=4.8"]
 
 [project.urls]
-Repository = "https://github.com/mjklopfer/telescope-control"
-Issues = "https://github.com/mjklopfer/telescope-control/issues"
+Repository = "https://github.com/mjklopfer/telescope-optical-tracking-control"
+Issues = "https://github.com/mjklopfer/telescope-optical-tracking-control/issues"
 
 [tool.setuptools]
 py-modules = [

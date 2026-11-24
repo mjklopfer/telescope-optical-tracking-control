@@ -12,7 +12,7 @@ Validated on 2026-11-22 on a Raspberry Pi 3B+, Raspberry Pi OS Trixie 32-bit
 (`armv7l`), Python 3.13.5. The isolated environment is:
 
 ```text
-/home/mklopfer/telescope-control/.venv
+/home/mklopfer/telescope-optical-tracking-control/.venv
 ```
 
 It uses the operating system's OpenCV 4.10.0, NumPy 2.2.4, SciPy 1.15.3 and
@@ -43,7 +43,7 @@ a camera reopen. The complete detected manifest is available read-only at
 the documented conservative fallback limits.
 
 The camera-only probe is at `tools/vision_tracker_probe.py` in this repository and
-was copied to `/home/mklopfer/telescope-control/tools`. It never commands motors.
+was copied to `/home/mklopfer/telescope-optical-tracking-control/tools`. It never commands motors.
 A 640x480 USB-camera bright-centroid run processed 96 frames in 5.012 seconds
 (19.15 FPS, mean processing time 52.0 ms). This does not include a detector,
 registration, Kalman/PID, web display or motor I/O.
@@ -51,7 +51,7 @@ registration, Kalman/PID, web display or motor I/O.
 ## Candidate source inventory
 
 Candidate repositories are shallow source checkouts below
-`/home/mklopfer/telescope-control/candidates`. They were not installed into the
+`/home/mklopfer/telescope-optical-tracking-control/candidates`. They were not installed into the
 system Python and have no telescope authority.
 
 | Candidate and exact checkout | Useful material | Current result / boundary |
@@ -144,13 +144,13 @@ preference to a generic video node.
 Start Control Bridge first, with no other data client, then run:
 
 ```console
-PYTHONPATH=/home/mklopfer/telescope-control \
-  /home/mklopfer/telescope-control/.venv/bin/python \
-  /home/mklopfer/telescope-control/tools/vision_dashboard.py \
+PYTHONPATH=/home/mklopfer/telescope-optical-tracking-control \
+  /home/mklopfer/telescope-optical-tracking-control/.venv/bin/python \
+  /home/mklopfer/telescope-optical-tracking-control/tools/vision_dashboard.py \
   --mode live-run --device auto --hil-host 192.168.1.149 --hil-port 2000 \
   --hil-envelope-degrees 5 --hil-display-span-degrees 5 \
   --hil-dispatch-rate-hz 4 --host 0.0.0.0 --allow-lan --port 8000 \
-  --log-directory /home/mklopfer/telescope-control/logs/live-optical
+  --log-directory /home/mklopfer/telescope-optical-tracking-control/logs/live-optical
 ```
 
 ### Automatic Pi startup
@@ -161,7 +161,7 @@ The legacy Celestron Control Bridge remains a separate companion service from
 requires that proxy. Neither project requires a root-owned service file:
 
 ```console
-cd /home/mklopfer/telescope-control
+cd /home/mklopfer/telescope-optical-tracking-control
 ./tools/install_pi_dashboard_service.sh
 ```
 
@@ -275,14 +275,14 @@ the requested target.
 Start the Control Bridge first, with no other client connected. Then run:
 
 ```console
-PYTHONPATH=/home/mklopfer/telescope-control \
-  /home/mklopfer/telescope-control/.venv/bin/python \
-  /home/mklopfer/telescope-control/tools/vision_dashboard.py \
+PYTHONPATH=/home/mklopfer/telescope-optical-tracking-control \
+  /home/mklopfer/telescope-optical-tracking-control/.venv/bin/python \
+  /home/mklopfer/telescope-optical-tracking-control/tools/vision_dashboard.py \
   --mode synthetic-hardware-loop --hil-host 192.168.1.149 \
   --hil-port 2000 --hil-envelope-degrees 5 --hil-display-span-degrees 5 \
   --hil-dispatch-rate-hz 4 \
   --host 0.0.0.0 --allow-lan --port 8000 \
-  --log-directory /home/mklopfer/telescope-control/logs/synthetic-hardware-loop
+  --log-directory /home/mklopfer/telescope-optical-tracking-control/logs/synthetic-hardware-loop
 ```
 
 Replace the bridge address with the Pi or computer actually running the bridge.

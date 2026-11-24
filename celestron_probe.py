@@ -16,8 +16,9 @@ import time
 import uuid
 from network_info import network_interfaces, route_source_address, neighbor_entries, parse_neighbors
 
-ROOT = Path(os.environ.get('TELESCOPE_CONTROL_DATA_DIR', os.environ.get(
-    'COSMOS90GT_DATA_DIR', str(Path.home() / '.telescope-control')))).expanduser()
+ROOT = Path(os.environ.get('TELESCOPE_OPTICAL_TRACKING_CONTROL_DATA_DIR', os.environ.get(
+    'TELESCOPE_CONTROL_DATA_DIR', os.environ.get(
+        'COSMOS90GT_DATA_DIR', str(Path.home() / '.telescope-optical-tracking-control'))))).expanduser()
 NODES = {0x01: 'Main board', 0x04: 'Hand controller', 0x0d: 'Hand controller plus',
          0x10: 'Azimuth motor', 0x11: 'Elevation motor', 0x12: 'Focuser',
          0xb0: 'GPS', 0xb2: 'RTC (model-dependent)', 0xb5: 'Wi-Fi adapter', 0xb6: 'Battery',

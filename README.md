@@ -1,4 +1,4 @@
-# Telescope Control
+# Telescope Optical Tracking Control
 
 Raspberry Pi visual tracking, camera control, target reacquisition and bounded
 Celestron AUX motor output for telescope-mounted cameras.
@@ -74,7 +74,7 @@ For the managed user service, inspect and run:
 tools/install_pi_dashboard_service.sh
 ```
 
-The service expects this checkout at `~/telescope-control`. Override paths and
+The service expects this checkout at `~/telescope-optical-tracking-control`. Override paths and
 addresses with the environment variables documented in
 `tools/run_pi_vision_dashboard.sh`.
 

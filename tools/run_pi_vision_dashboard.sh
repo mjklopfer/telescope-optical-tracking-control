@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-PROJECT_DIR="${TELESCOPE_CONTROL_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}"
-VENV_DIR="${TELESCOPE_CONTROL_VENV:-$PROJECT_DIR/.venv}"
+PROJECT_DIR="${TELESCOPE_OPTICAL_TRACKING_CONTROL_DIR:-${TELESCOPE_CONTROL_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}}"
+VENV_DIR="${TELESCOPE_OPTICAL_TRACKING_CONTROL_VENV:-${TELESCOPE_CONTROL_VENV:-$PROJECT_DIR/.venv}}"
 TELESCOPE_HOST="${CELESTRON_TELESCOPE_HOST:-192.168.1.231}"
 LOCAL_IP=$(/usr/bin/ip -4 route get "$TELESCOPE_HOST" | /usr/bin/awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
 if [ -z "$LOCAL_IP" ]; then

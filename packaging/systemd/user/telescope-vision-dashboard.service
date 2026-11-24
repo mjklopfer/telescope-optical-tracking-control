@@ -6,8 +6,8 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-WorkingDirectory=%h/telescope-control
-ExecStart=%h/telescope-control/tools/run_pi_vision_dashboard.sh
+WorkingDirectory=%h/telescope-optical-tracking-control
+ExecStart=%h/telescope-optical-tracking-control/tools/run_pi_vision_dashboard.sh
 Restart=always
 RestartSec=5
 TimeoutStopSec=5
