@@ -266,10 +266,13 @@ Rechecked on 2026-11-25 after reboot: the companion Bridge management endpoint
 was verified, both encoder streams were fresh, and polling held approximately
 3.998 Hz with zero observed overruns. The dashboard document loaded and its
 Bridge controls updated without waiting for MJPEG bytes. The installed OV5647
-was detected but delivered no frame in either the dashboard or a standalone
-`rpicam-still` probe; both reported `Camera frontend has timed out`. Camera
-hardware recovery, real-image tracking and fresh physical motion validation
-therefore remain incomplete. The Pi still reported user lingering disabled, so
+was detected but initially delivered no frame in either the dashboard or a
+standalone `rpicam-still` probe; both reported `Camera frontend has timed out`.
+After the final dashboard service restart it recovered and advanced at about
+20.6 FPS. The CSI failure remains intermittent and not root-caused. The Bridge
+management endpoint was Ready and verified, but the dashboard motor client still
+reported `connecting` without cached encoder positions; real-image tracking and
+fresh physical motion validation therefore remain incomplete. The Pi still reported user lingering disabled, so
 pre-login service startup is also not verified; graphical-login startup remains
 the tested path.
 

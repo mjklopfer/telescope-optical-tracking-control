@@ -105,10 +105,13 @@ See [the complete Pi vision-stack engineering notes](docs/PI-VISION-STACK.md) an
   3.998 Hz polling with zero observed overruns were verified after reboot.
 - The dashboard document now loads even when the MJPEG stream has no frames;
   startup telemetry also tolerates an empty object list.
-- The installed OV5647 was detected but produced repeated libcamera
-  `Camera frontend has timed out` errors in both the dashboard and a standalone
-  `rpicam-still` check. This is an unresolved CSI cable/sensor data-path problem,
-  not a verified dashboard recovery failure.
+- The installed OV5647 first produced repeated libcamera `Camera frontend has
+  timed out` errors in both the dashboard and a standalone `rpicam-still` check.
+  After the final dashboard service restart it recovered and advanced at about
+  20.6 FPS. The intermittent CSI failure is therefore not root-caused or closed.
+- The final Bridge management check was Ready and verified, but the dashboard's
+  motor client remained `connecting` with no cached encoder positions. Do not
+  treat the management endpoint alone as a live motion link.
 - No real-camera closed-loop tracking or new physical motion test was completed
   in this verification session.
 

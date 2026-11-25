@@ -17,10 +17,13 @@
   bytes instead of leaving the browser document perpetually pending.
 - RESUME / ON now reports why it is unavailable when there is no advancing
   camera frame or selected live target instead of appearing inert.
-- The OV5647 remains a hardware blocker. It was detected, but both the dashboard
-  and an independent `rpicam-still` probe repeatedly reported `Camera frontend
-  has timed out`; no image was produced. Reseat/replace the CSI cable or sensor
-  while powered down before resuming optical tests.
+- The OV5647 initially blocked testing: both the dashboard and an independent
+  `rpicam-still` probe repeatedly reported `Camera frontend has timed out`. After
+  the final dashboard service restart it recovered and advanced at about 20.6
+  FPS. The intermittent CSI fault remains unexplained; do not call it fixed.
+- The final Bridge management report was Ready and verified, but the dashboard's
+  motor client remained `connecting` without cached encoder positions. Motion
+  readiness was not reestablished or tested.
 - Pre-login auto-start remains incomplete because user lingering is still off.
   Normal graphical-login startup is the verified path.
 - No real-camera closed-loop tracking or fresh physical movement was performed
