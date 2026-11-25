@@ -7,5 +7,6 @@ dist/
 *.egg-info/
 logs/
 runtime-data/
+outputs/
 *.csv
 

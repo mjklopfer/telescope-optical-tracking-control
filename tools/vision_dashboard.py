@@ -33,6 +33,8 @@ import time
 import cv2
 import numpy as np
 
+from network_info import route_source_address
+
 
 def enumerate_cameras():
     """Return Pi/libcamera and Linux V4L2 capture devices."""
@@ -191,11 +193,101 @@ def wrapped_encoder_delta(current, baseline):
     return (int(current) - int(baseline) + modulus // 2) % modulus - modulus // 2
 
 
+def estimate_backlash_breakpoint(trials, minimum_trials=3):
+    """Estimate repeatable encoder dead travel before coherent image motion.
+
+    Each trial contains ``(encoder_degrees, pixel_distance)`` samples acquired
+    after reversing an already-loaded axis.  Candidate breakpoints are scored
+    as a flat pre-motion region followed by a positive linear response.  The
+    median of accepted trial breakpoints rejects vibration and tracker jitter;
+    spread is returned so callers can refuse an inconsistent measurement.
+    """
+    estimates = []
+    diagnostics = []
+    for samples in trials:
+        clean = sorted((float(x), float(y)) for x, y in samples
+                       if math.isfinite(float(x)) and math.isfinite(float(y)))
+        if len(clean) < 6:
+            diagnostics.append({'accepted': False, 'reason': 'fewer than 6 samples'})
+            continue
+        x = np.asarray([item[0] for item in clean], dtype=float)
+        y = np.asarray([item[1] for item in clean], dtype=float)
+        baseline_values = y[:min(3, len(y))]
+        baseline = float(np.median(baseline_values))
+        noise = float(np.median(np.abs(baseline_values - baseline)))
+        activation = baseline + max(1.5, noise * 4)
+        best = None
+        for index in range(2, len(clean) - 3):
+            tail_x, tail_y = x[index:], y[index:]
+            slope, intercept = np.polyfit(tail_x, tail_y, 1)
+            if slope <= 0:
+                continue
+            breakpoint = (activation - intercept) / slope
+            if not 0 <= breakpoint <= x[-1]:
+                continue
+            pre_residual = float(np.mean((y[:index] - baseline) ** 2))
+            predicted = slope * tail_x + intercept
+            post_residual = float(np.mean((tail_y - predicted) ** 2))
+            total_variance = float(np.sum((tail_y - np.mean(tail_y)) ** 2))
+            r_squared = (1.0 - float(np.sum((tail_y - predicted) ** 2)) /
+                         total_variance) if total_variance > 1e-9 else 0.0
+            score = pre_residual + post_residual
+            candidate = (score, float(breakpoint), float(slope), index,
+                         float(r_squared))
+            if best is None or candidate[0] < best[0]:
+                best = candidate
+        if (best is None or best[4] < .75 or
+                float(np.max(y) - baseline) < 3):
+            diagnostics.append({'accepted': False,
+                                'reason': ('poor linear response or probable '
+                                           'tracker jump')})
+            continue
+        estimates.append(best[1])
+        diagnostics.append({'accepted': True, 'breakpoint_degrees': best[1],
+                            'slope_pixels_per_degree': best[2],
+                            'fit_score': best[0], 'fit_start_index': best[3],
+                            'r_squared': best[4]})
+    minimum_trials = int(minimum_trials)
+    if len(estimates) < minimum_trials:
+        raise ValueError(
+            f'Backlash characterization needs {minimum_trials} consistent '
+            'reversals; '
+            'reacquire a distinctive feature and retry')
+    median = float(np.median(estimates))
+    spread = float(np.median(np.abs(np.asarray(estimates) - median)))
+    if spread > max(.025, median * .5):
+        raise ValueError(
+            f'Backlash reversals were inconsistent (median {median:.3f}\u00b0, '
+            f'spread {spread:.3f}\u00b0)')
+    return {'degrees': median, 'spread_degrees': spread,
+            'accepted_trials': len(estimates), 'trial_fits': diagnostics}
+
+
 def learned_mount_delta(error_x, error_y, calibration):
     """Return mount movement needed to drive the measured pixel error to zero."""
     inverse = calibration['inverse_degrees_per_pixel']
     return (-(inverse[0][0] * error_x + inverse[0][1] * error_y),
             -(inverse[1][0] * error_x + inverse[1][1] * error_y))
+
+
+def transfer_mount_delta(error_x, error_y, coefficients):
+    """Invert the known artificial encoder-to-pixel plant.
+
+    Transfer mode renders ``pixel = path - M * encoder_delta``.  The encoder
+    correction which cancels the current pixel error is therefore
+    ``M^-1 * error``.  This intentionally does not use a saved camera mapping:
+    a stale real-camera profile would make the synthetic plant test a test of
+    the wrong matrix and can reduce valid commands below the mount's backlash.
+    """
+    a = float(coefficients['azimuth_x_px_per_degree'])
+    b = float(coefficients['elevation_x_px_per_degree'])
+    c = float(coefficients['azimuth_y_px_per_degree'])
+    d = float(coefficients['elevation_y_px_per_degree'])
+    determinant = a * d - b * c
+    if abs(determinant) < 1e-9:
+        raise ValueError('Artificial transfer matrix is singular')
+    return ((d * error_x - b * error_y) / determinant,
+            (-c * error_x + a * error_y) / determinant)
 
 
 class BrightObjectTracker:
@@ -356,8 +448,10 @@ class VisionDashboardEngine:
                  height=480, fps=20, threshold=160, jpeg_quality=65,
                  log_directory='vision-dashboard-logs', polarity='bright',
                  hil_host=None, hil_port=2000, hil_envelope_degrees=4,
-                 hil_dispatch_rate_hz=4, hil_display_span_degrees=5,
-                 ui_mode='demo'):
+                 hil_dispatch_rate_hz=4, hil_feedback_timeout_seconds=10,
+                 hil_display_span_degrees=5,
+                 ui_mode='demo', hil_route_target=None,
+                 bridge_recovery_quiet_seconds=8):
         self.source, self.device = source, device
         self.desired_source = source
         self.ui_mode = ui_mode
@@ -370,13 +464,14 @@ class VisionDashboardEngine:
         self.feature_samples = deque(maxlen=240)
         self.orientation_history = deque(maxlen=120)
         self.orientation_sanity = {'status': 'idle', 'message': None}
+        self.orientation_auto_reversed = False
         self.orientation_calibration = {
             'status': 'not learned', 'valid': False,
             'message': 'Lock a stable feature, then turn tracking ON to run soft start.'}
         self.orientation_calibration_thread = None
         self.orientation_cancel = threading.Event()
-        self.soft_start_step_degrees = .5
-        self.soft_start_slew_rate = 1
+        self.soft_start_step_degrees = .05
+        self.soft_start_slew_rate = 5
         self.soft_start_ramp_started = None
         data_root = os.getenv('TELESCOPE_OPTICAL_TRACKING_CONTROL_DATA_DIR', os.getenv(
             'TELESCOPE_CONTROL_DATA_DIR', os.getenv(
@@ -392,20 +487,26 @@ class VisionDashboardEngine:
         self.bridge_service_restart_in_progress = False
         self.bridge_service_restart_count = 0
         self.bridge_service_restart_result = None
-        self.cameras = enumerate_cameras()
-        if str(self.device).lower() == 'auto' and self.cameras:
-            preferred = next((camera for camera in self.cameras
-                              if 'usb' in camera['name'].lower()
-                              or 'uvc' in camera['name'].lower()), self.cameras[0])
-            self.device = preferred['device']
+        # Camera enumeration can take tens of seconds on a Pi with many V4L2
+        # nodes or a slow CSI frontend. Never hold HTTP startup behind it.
+        self.cameras = []
+        self.camera_inventory_thread = None
+        self.camera_inventory_status = 'Camera discovery has not started.'
+        self.camera_device_auto = str(self.device).lower() == 'auto'
         if str(self.device).startswith('picamera2:'):
             self.source = self.desired_source = 'picamera2'
         self.camera_reopen_requested = False
         self.camera_recovery_requested = False
         self.camera_recovery_count = 0
+        self.camera_recovery_thread = None
+        self.camera_recovery_in_progress = False
+        self.camera_recovery_status = 'Camera recovery has not been requested.'
+        self.camera_recovery_result = None
         self.camera_metadata = {}
         self.camera_control_ranges = {}
         self.camera_auto_exposure = True
+        self.camera_gain_locked = False
+        self.camera_software_ae_last = 0.0
         self.camera_exposure_value = 0.0
         self.camera_manual_exposure_us = 10000
         self.camera_manual_gain = 1.0
@@ -417,7 +518,9 @@ class VisionDashboardEngine:
         self.tracker = BrightObjectTracker(threshold=threshold, polarity=polarity,
                                            max_missed=max(8, round(float(fps) * 2.5)))
         self.tracking_mode = 'feature-roi' if ui_mode == 'live' else 'threshold'
-        self.feature_algorithm = 'CSRT'
+        # KCF is substantially lighter than CSRT on the Pi and keeps CSI
+        # capture draining while a live feature is locked.
+        self.feature_algorithm = 'KCF'
         self.feature_lock_size = True
         self.feature_initial_size = None
         self.feature_reference_patch = None
@@ -427,10 +530,14 @@ class VisionDashboardEngine:
         self.feature_reacquiring = False
         self.feature_reacquire_candidate = None
         self.feature_reacquire_confirmations = 0
+        self.manual_lock_hold = None
+        self.manual_lock_hold_generation = 0
+        self.hil_reference_rebasing = False
         self.feature_last_confirmed = None
         self.feature_tracker = None
         self.feature_roi_pending = None
         self.feature_selected_id = None
+        self.feature_error = None
         self.log_directory = Path(log_directory).expanduser()
         self.lock = threading.RLock()
         self.frame_ready = threading.Condition(self.lock)
@@ -438,16 +545,38 @@ class VisionDashboardEngine:
         self.thread = None
         self.capture = None
         self.jpeg = None
-        self.telemetry = {'frame': -1, 'state': 'STARTING', 'motor_output': 'DISABLED'}
+        # Keep the first WebSocket snapshot schema complete even when camera
+        # discovery or CSI recovery has not produced a frame yet.  The browser
+        # must remain usable for Bridge status and recovery controls.
+        self.telemetry = {
+            'frame': -1,
+            'state': 'STARTING',
+            'motor_output': 'DISABLED',
+            'objects': [],
+            'selected_track_id': None,
+            'error_x_px': None,
+            'error_y_px': None,
+            'capture_fps': None,
+            'processing_ms': None,
+            'recording': False,
+            'record_path': None,
+        }
         self.record_requested = False
         self.record_path = None
         self.record_stream = None
         self.record_writer = None
         self.errors = deque(maxlen=1200)
         self.hil_host = hil_host
+        self.hil_route_target = hil_route_target
         self.hil_port = int(hil_port)
+        self.bridge_recovery_quiet_seconds = max(
+            0.0, float(bridge_recovery_quiet_seconds))
         self.hil_envelope_degrees = float(hil_envelope_degrees)
         self.hil_dispatch_rate_hz = float(hil_dispatch_rate_hz)
+        # Measured effective one-second pulse average for native slew level 5
+        # on the COSMOS 90GT profile. The UI exposes all measured levels 1-9.
+        self.hil_max_tracking_slew_deg_s = .0753
+        self.hil_feedback_timeout_seconds = float(hil_feedback_timeout_seconds)
         self.hil_display_span_degrees = float(hil_display_span_degrees)
         if not .1 <= self.hil_display_span_degrees <= 10:
             raise ValueError('Display span must be 0.1–10 degrees')
@@ -462,8 +591,10 @@ class VisionDashboardEngine:
         self.hil_target_rate = None
         self.hil_last_visible_target = None
         self.hil_current_target = None
-        self.hil_loss_mode = 'stop'
-        self.hil_coast_seconds = .5
+        # Development default: keep following the last measured trajectory
+        # through a temporary visual dropout instead of freezing the mount.
+        self.hil_loss_mode = 'predictive-coast'
+        self.hil_coast_seconds = .25
         self.hil_last_locked_marker = None
         self.hil_return_started = None
         self.vibration_filter_enabled = False
@@ -471,10 +602,18 @@ class VisionDashboardEngine:
         self.vibration_filtered_point = None
         self.vibration_candidate = None
         self.vibration_candidate_frames = 0
-        self.hil_control_preset = 'off'
-        self.hil_prediction_horizon = 0.0
-        self.hil_proportional_lead = 0.0
-        self.hil_correction_deadband = 0.0
+        self.hil_control_preset = 'balanced'
+        self.hil_prediction_horizon = .05
+        self.hil_proportional_lead = .55
+        self.hil_derivative_damping = .10
+        self.hil_correction_deadband = .02
+        self.hil_control_error_state = None
+        self.hil_filtered_error_rate = (0.0, 0.0)
+        self.hil_control_terms = None
+        self.hil_initial_trajectory_enabled = False
+        self.hil_initial_trajectory_window = 2.0
+        self.hil_initial_trajectory = {
+            'valid': False, 'message': 'Initial trajectory learning is OFF.'}
         self.hil_auto_horizon = .1
         self.hil_commanded_target = None
         self.hil_error = None
@@ -482,6 +621,22 @@ class VisionDashboardEngine:
                                 'hidden_seconds': .5, 'fade_in_seconds': .5,
                                 'period_seconds': 4.0, 'phase': 'steady',
                                 'intensity': None}
+        # Transfer-Function Test simulates the camera response from the
+        # real mount encoders. The cross-axis terms force the learner to
+        # identify a full 2x2 transform instead of assuming orthogonal axes.
+        self.transfer_function = {
+            'azimuth_x_px_per_degree': 180.0,
+            'azimuth_y_px_per_degree': 25.0,
+            'elevation_x_px_per_degree': -18.0,
+            'elevation_y_px_per_degree': -150.0,
+        }
+        self.transfer_encoder_origin = None
+        self.transfer_path_started = time.monotonic()
+        self.transfer_pan_duration_seconds = 30 * 60
+        self.transfer_frozen_path = None
+        self.transfer_state = {
+            'encoder_live': False, 'encoder_delta_degrees': None,
+            'path_offset_pixels': None, 'plant_offset_pixels': None}
         self._load_orientation_profile()
 
     def start(self):
@@ -498,18 +653,83 @@ class VisionDashboardEngine:
             self.bridge_monitor_thread = threading.Thread(
                 target=self._bridge_monitor, name='bridge-status', daemon=True)
             self.bridge_monitor_thread.start()
+        self._start_camera_inventory()
         self.camera_recovery_requested = False
         self.thread = threading.Thread(target=self._run, name='vision-capture', daemon=True)
         self.thread.start()
+
+    def _start_camera_inventory(self):
+        if self.camera_inventory_thread and self.camera_inventory_thread.is_alive():
+            return
+
+        def worker():
+            self.camera_inventory_status = 'Searching for CSI and USB cameras.'
+            try:
+                cameras = enumerate_cameras()
+                with self.lock:
+                    self.cameras = cameras
+                    if self.camera_device_auto and cameras:
+                        preferred = next((camera for camera in cameras
+                                          if 'usb' in camera['name'].lower()
+                                          or 'uvc' in camera['name'].lower()), cameras[0])
+                        self.device = preferred['device']
+                        self.desired_source = ('picamera2'
+                                               if self.device.startswith('picamera2:')
+                                               else 'v4l2')
+                        self.camera_reopen_requested = True
+                self.camera_inventory_status = (
+                    f'Camera discovery complete: {len(cameras)} capture device(s) found.')
+            except Exception as error:
+                self.camera_inventory_status = f'Camera discovery failed: {error}'
+
+        self.camera_inventory_thread = threading.Thread(
+            target=worker, name='camera-inventory', daemon=True)
+        self.camera_inventory_thread.start()
 
     def _new_position_controller(self):
         from position_control import PositionController
         controller = PositionController(
             self.hil_host, self.hil_port,
             envelope_degrees=self.hil_envelope_degrees,
-            dispatch_rate_hz=self.hil_dispatch_rate_hz)
+            feedback_timeout=self.hil_feedback_timeout_seconds,
+            dispatch_rate_hz=self.hil_dispatch_rate_hz,
+            stop_on_divergence=False)
         controller.start()
         return controller
+
+    def _current_bridge_host(self):
+        """Return the current local route address used to reach the telescope.
+
+        The bridge listener runs on the Pi's LAN address. DHCP can briefly
+        assign one address during boot and then replace it. When a route target
+        is configured, re-resolve that local address instead of retaining the
+        stale launch-time value.
+        """
+        if not self.hil_route_target:
+            return self.hil_host
+        return route_source_address(self.hil_route_target, self.hil_port)
+
+    def _refresh_bridge_host(self):
+        current = self._current_bridge_host()
+        if not current:
+            raise ConnectionError('No routed local IPv4 address is available for the telescope.')
+        changed = current != self.hil_host
+        self.hil_host = current
+        if changed:
+            self.bridge_status_next_poll = 0.0
+        return changed
+
+    def _stop_position_controller(self):
+        controller = self.hil_controller
+        if not controller:
+            return
+        controller.pause()
+        controller.stop()
+        if controller.thread:
+            controller.thread.join(5)
+        if controller.thread and controller.thread.is_alive():
+            raise RuntimeError('Previous dashboard connection did not close; retry after it stops')
+        self.hil_controller = None
 
     def stop(self):
         self.orientation_cancel.set()
@@ -528,18 +748,50 @@ class VisionDashboardEngine:
         self._close_recording()
 
     def _orientation_profile_key(self):
-        return f'{self.hil_host or "display-only"}|{self.device}|{self.width}x{self.height}'
+        telescope = self.hil_route_target or self.hil_host or 'display-only'
+        source = 'transfer-function-test' if self.ui_mode == 'transfer' else 'camera'
+        return (f'{source}|{telescope}|{self.device}|{self.width}x{self.height}|'
+                f'hrev{int(self.image_horizontal_reversed)}|'
+                f'vrev{int(self.image_vertical_reversed)}')
 
     def _load_orientation_profile(self):
         try:
-            payload = json.loads(self.orientation_profile_path.read_text(encoding='utf-8'))
+            profile_path = self.orientation_profile_path
+            if not profile_path.exists():
+                legacy_path = Path.home() / '.cosmos90gt' / 'vision-orientation-profiles.json'
+                if legacy_path.exists():
+                    profile_path = legacy_path
+            payload = json.loads(profile_path.read_text(encoding='utf-8'))
             profile = payload.get(self._orientation_profile_key())
+            if not profile:
+                # The bridge computer's LAN address can change.  The mapping is
+                # a relationship between this camera/resolution and the mount,
+                # so do not strand a measured mapping under an old bridge IP.
+                profile = next((candidate for candidate in payload.values()
+                                if candidate.get('camera_device') == self.device
+                                and candidate.get('width') == self.width
+                                and candidate.get('height') == self.height
+                                and bool(candidate.get(
+                                    'image_horizontal_reversed', False)) ==
+                                    self.image_horizontal_reversed
+                                and bool(candidate.get(
+                                    'image_vertical_reversed', False)) ==
+                                    self.image_vertical_reversed
+                                and candidate.get('profile_source', 'camera') ==
+                                    ('transfer-function-test'
+                                     if self.ui_mode == 'transfer' else 'camera')
+                                and candidate.get('inverse_degrees_per_pixel')), None)
             if profile:
                 profile = dict(profile)
-                profile.update(status='warm profile available', valid=False,
+                inverse = profile.get('inverse_degrees_per_pixel')
+                usable = (isinstance(inverse, list) and len(inverse) == 2
+                          and all(isinstance(row, list) and len(row) == 2
+                                  for row in inverse))
+                profile.update(status=('loaded' if usable else 'invalid'), valid=usable,
                                warm_profile=True,
-                               message=('Saved camera-to-mount mapping found. Tracking ON will '
-                                        'validate it with bounded probe movements before use.'))
+                               message=('Saved measured camera-to-mount mapping loaded and ready.'
+                                        if usable else
+                                        'Saved camera-to-mount mapping is incomplete; run Learn once.'))
                 self.orientation_calibration = profile
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             return
@@ -553,7 +805,12 @@ class VisionDashboardEngine:
         profile = {key: value for key, value in calibration.items()
                    if key not in ('status', 'valid', 'message', 'phase', 'warm_profile')}
         profile.update(camera_device=self.device, width=self.width, height=self.height,
-                       telescope_host=self.hil_host, saved_utc_epoch_s=time.time())
+                       telescope_host=self.hil_route_target or self.hil_host,
+                       image_horizontal_reversed=self.image_horizontal_reversed,
+                       image_vertical_reversed=self.image_vertical_reversed,
+                       profile_source=('transfer-function-test'
+                                       if self.ui_mode == 'transfer' else 'camera'),
+                       saved_utc_epoch_s=time.time())
         payload[self._orientation_profile_key()] = profile
         temporary = self.orientation_profile_path.with_suffix('.tmp')
         temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding='utf-8')
@@ -634,9 +891,23 @@ class VisionDashboardEngine:
                     'message': ('Bridge management API verified.' if identity.get('ready')
                                 else 'Bridge process replied but is not ready.')}
         except (OSError, ValueError, json.JSONDecodeError) as error:
+            service_state = None
+            try:
+                service = subprocess.run(
+                    ['/usr/bin/systemctl', '--user', 'is-active',
+                     'celestron-bridge.service'],
+                    capture_output=True, text=True, timeout=.75, check=False)
+                service_state = service.stdout.strip() or None
+            except (OSError, subprocess.SubprocessError):
+                pass
+            message = f'Bridge management API unavailable: {error}'
+            if service_state in ('active', 'activating'):
+                message = (f'Control Bridge service is {service_state}, but its management '
+                           'port is not ready. It is retrying the telescope connection; '
+                           'verify telescope power, Wi-Fi association and endpoint address.')
             self.bridge_status = {
                 'management_reachable': False, 'verified_proxy': False,
-                'message': f'Bridge management API unavailable: {error}'}
+                'service_state': service_state, 'message': message}
         finally:
             if sock:
                 sock.close()
@@ -644,22 +915,25 @@ class VisionDashboardEngine:
 
     def _bridge_monitor(self):
         while not self.stop_event.is_set():
+            if self.hil_route_target and not self.bridge_service_restart_in_progress:
+                try:
+                    if self._current_bridge_host() != self.hil_host:
+                        self.bridge_service_restart_result = (
+                            'The Pi LAN address changed; automatic Bridge recovery started.')
+                        self.restart_bridge_service()
+                except OSError:
+                    pass
             self._poll_bridge_management(force=True)
             self.stop_event.wait(2.0)
 
     def reconnect_bridge_client(self):
         """Restart this dashboard's motor link without restarting Control Bridge."""
-        if not self.hil_controller:
+        if not self.hil_host and not self.hil_route_target:
             raise ValueError('No bridge endpoint was configured at launch')
         if self.hil_enabled:
             self.set_hil_enabled(False)
-        old_controller = self.hil_controller
-        old_controller.pause()
-        old_controller.stop()
-        if old_controller.thread:
-            old_controller.thread.join(5)
-        if old_controller.thread and old_controller.thread.is_alive():
-            raise RuntimeError('Previous dashboard connection did not close; retry after it stops')
+        self._stop_position_controller()
+        self._refresh_bridge_host()
         self.hil_controller = self._new_position_controller()
         self.bridge_manual_reconnects += 1
         self.hil_previous_target = None
@@ -679,7 +953,7 @@ class VisionDashboardEngine:
         """
         if self.bridge_service_restart_thread and self.bridge_service_restart_thread.is_alive():
             return
-        if not self.hil_controller:
+        if not self.hil_host and not self.hil_route_target:
             raise ValueError('No bridge endpoint was configured at launch')
         if self.hil_enabled:
             self.set_hil_enabled(False)
@@ -689,18 +963,36 @@ class VisionDashboardEngine:
 
         def worker():
             try:
-                self.hil_controller.pause()
+                self.bridge_service_restart_result = (
+                    'Stage 1/4: releasing the dashboard motor connection.')
+                self._stop_position_controller()
                 result = subprocess.run(
-                    ['/usr/bin/systemctl', '--user', 'restart', 'celestron-bridge.service'],
+                    ['/usr/bin/systemctl', '--user', 'stop', 'celestron-bridge.service'],
                     capture_output=True, text=True, timeout=20, check=False)
                 if result.returncode:
                     detail = (result.stderr or result.stdout).strip()
                     raise RuntimeError(
-                        'Control Bridge service restart failed' +
+                        'Control Bridge service stop failed' +
+                        (f': {detail}' if detail else '.'))
+                self.bridge_service_restart_result = (
+                    'Stage 2/4: Bridge stopped; allowing the legacy Wi-Fi socket to close.')
+                if self.stop_event.wait(self.bridge_recovery_quiet_seconds):
+                    raise RuntimeError('Bridge recovery was cancelled during shutdown.')
+                changed = self._refresh_bridge_host()
+                self.bridge_service_restart_result = (
+                    'Stage 3/4: starting the Bridge on ' + self.hil_host +
+                    (' after refreshing the Pi LAN address.' if changed else '.'))
+                result = subprocess.run(
+                    ['/usr/bin/systemctl', '--user', 'start', 'celestron-bridge.service'],
+                    capture_output=True, text=True, timeout=20, check=False)
+                if result.returncode:
+                    detail = (result.stderr or result.stdout).strip()
+                    raise RuntimeError(
+                        'Control Bridge service start failed' +
                         (f': {detail}' if detail else '.'))
                 self.bridge_service_restart_count += 1
                 self.bridge_service_restart_result = (
-                    'Control Bridge restarted; waiting for its management endpoint.')
+                    'Stage 3/4: waiting for the Bridge management endpoint.')
                 deadline = time.monotonic() + 30
                 while time.monotonic() < deadline:
                     status = self._poll_bridge_management(force=True)
@@ -711,9 +1003,10 @@ class VisionDashboardEngine:
                     raise ConnectionError(
                         'Control Bridge restarted, but its management endpoint did not return.')
 
-                self.reconnect_bridge_client()
+                self.hil_controller = self._new_position_controller()
+                self.bridge_manual_reconnects += 1
                 self.bridge_service_restart_result = (
-                    'Control Bridge is running; waiting for fresh motor feedback.')
+                    'Stage 4/4: Bridge is running; waiting for both motor encoders.')
                 deadline = time.monotonic() + 30
                 while time.monotonic() < deadline:
                     if self.hil_controller.status().get('connection') == 'live':
@@ -826,6 +1119,130 @@ class VisionDashboardEngine:
             cv2.circle(frame, (int(x), int(y)), radius, value, -1)
         return frame
 
+    def _hybrid_target(self, frame, index):
+        """Overlay one deterministic target while retaining the real camera frame."""
+        height, width = frame.shape[:2]
+        t = index / max(1, self.requested_fps)
+        x = width * (.5 + .22 * math.sin(t * .45))
+        y = height * (.5 + .18 * math.sin(t * .31 + .7))
+        radius = max(6, round(min(width, height) * .015))
+        # A dark rim plus bright core remains visible on bright or dark camera
+        # scenes. Control uses the known synthetic coordinates directly; scene
+        # thresholding cannot steal the target identity.
+        cv2.circle(frame, (round(x), round(y)), radius + 3, 0, -1)
+        cv2.circle(frame, (round(x), round(y)), radius, 255, -1)
+        return {'track_id': 1, 'x': float(x), 'y': float(y),
+                'bbox': [round(x - radius), round(y - radius),
+                         radius * 2, radius * 2],
+                'area': float(math.pi * radius * radius),
+                'brightness': 255.0, 'confidence': 1.0,
+                'missed': 0, 'selected': True, 'synthetic': True}
+
+    @staticmethod
+    def _wrapped_degrees_delta(current, origin):
+        return (float(current) - float(origin) + 180.0) % 360.0 - 180.0
+
+    def _transfer_path(self):
+        """Return a one-way, 30-minute artificial-sky pan in camera pixels."""
+        elapsed = time.monotonic() - self.transfer_path_started
+        progress = max(0.0, min(1.0, elapsed / self.transfer_pan_duration_seconds))
+        # Traverse 32% of the frame horizontally while a shallow half-sine
+        # adds cross-axis motion.  At 640x480 this is only ~0.114 px/s in X,
+        # slow enough for a 30-minute camera/motor/link stability soak.
+        return (self.width * .32 * (progress - .5),
+                self.height * .08 * math.sin(math.pi * progress))
+
+    def _transfer_target(self, frame):
+        """Render the real-encoder-driven artificial optical plant.
+
+        Pixel position = moving object path - M * encoder displacement. The
+        scene therefore moves opposite telescope motion. During Learn/Validate
+        the path freezes so the learner measures only the encoder response.
+        """
+        height, width = frame.shape[:2]
+        learning = self.orientation_calibration.get('status') == 'running'
+        if learning:
+            if self.transfer_frozen_path is None:
+                self.transfer_frozen_path = self._transfer_path()
+            path_x, path_y = self.transfer_frozen_path
+        else:
+            self.transfer_frozen_path = None
+            path_x, path_y = self._transfer_path()
+
+        positions = {}
+        connection = 'disconnected'
+        if self.hil_controller:
+            status = self.hil_controller.status()
+            connection = status.get('connection', 'unknown')
+            positions = status.get('positions', {})
+        azimuth = positions.get('Azimuth', {}).get('raw_degrees')
+        elevation = positions.get('Elevation', {}).get('raw_degrees')
+        encoder_live = connection == 'live' and azimuth is not None and elevation is not None
+        if encoder_live and self.transfer_encoder_origin is None:
+            self.transfer_encoder_origin = (float(azimuth), float(elevation))
+
+        delta_azimuth = delta_elevation = 0.0
+        if encoder_live and self.transfer_encoder_origin:
+            delta_azimuth = self._wrapped_degrees_delta(
+                azimuth, self.transfer_encoder_origin[0])
+            delta_elevation = self._wrapped_degrees_delta(
+                elevation, self.transfer_encoder_origin[1])
+        coefficients = self.transfer_function
+        plant_x = (coefficients['azimuth_x_px_per_degree'] * delta_azimuth
+                   + coefficients['elevation_x_px_per_degree'] * delta_elevation)
+        plant_y = (coefficients['azimuth_y_px_per_degree'] * delta_azimuth
+                   + coefficients['elevation_y_px_per_degree'] * delta_elevation)
+        x = width / 2 + path_x - plant_x
+        y = height / 2 + path_y - plant_y
+        radius = max(6, round(min(width, height) * .015))
+        cv2.circle(frame, (round(x), round(y)), radius + 3, 0, -1)
+        cv2.circle(frame, (round(x), round(y)), radius, 255, -1)
+        self.transfer_state = {
+            'encoder_live': encoder_live,
+            'encoder_origin_degrees': self.transfer_encoder_origin,
+            'encoder_delta_degrees': [delta_azimuth, delta_elevation],
+            'path_offset_pixels': [path_x, path_y],
+            'plant_offset_pixels': [plant_x, plant_y],
+            'path_frozen_for_learning': learning,
+            'path_mode': '30-minute-slow-pan',
+            'path_elapsed_seconds': min(
+                self.transfer_pan_duration_seconds,
+                time.monotonic() - self.transfer_path_started),
+            'path_duration_seconds': self.transfer_pan_duration_seconds,
+            'coefficients': dict(coefficients),
+        }
+        return {'track_id': 1, 'x': float(x), 'y': float(y),
+                'bbox': [round(x - radius), round(y - radius), radius * 2, radius * 2],
+                'area': float(math.pi * radius * radius),
+                'brightness': 255.0, 'confidence': 1.0,
+                'missed': 0, 'selected': True, 'synthetic': True,
+                'transfer_function_test': True}
+
+    def set_transfer_function(self, azimuth_x, azimuth_y, elevation_x, elevation_y):
+        if self.ui_mode != 'transfer':
+            raise ValueError('Transfer terms can be changed only in Transfer-Function Test')
+        if self.hil_enabled:
+            raise ValueError('Turn tracking output OFF before changing the transfer function')
+        values = [float(value) for value in
+                  (azimuth_x, azimuth_y, elevation_x, elevation_y)]
+        if not all(math.isfinite(value) and abs(value) <= 1000 for value in values):
+            raise ValueError('Each transfer term must be finite and within -1000 to 1000 px/degree')
+        determinant = values[0] * values[3] - values[2] * values[1]
+        scale = max(1.0, math.hypot(values[0], values[1]) *
+                    math.hypot(values[2], values[3]))
+        if abs(determinant) / scale < .05:
+            raise ValueError('Transfer matrix is singular or nearly singular; use two distinct axis vectors')
+        self.transfer_function = {
+            'azimuth_x_px_per_degree': values[0],
+            'azimuth_y_px_per_degree': values[1],
+            'elevation_x_px_per_degree': values[2],
+            'elevation_y_px_per_degree': values[3],
+        }
+        self.transfer_encoder_origin = None
+        self.transfer_path_started = time.monotonic()
+        self.transfer_frozen_path = None
+        self._invalidate_orientation('Transfer function changed; run Learn / validate to identify it.')
+
     def _open_recording(self):
         self.log_directory.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
@@ -855,18 +1272,27 @@ class VisionDashboardEngine:
             status = self.hil_controller.status()
             if status.get('connection') != 'live':
                 raise ValueError('Motor link is not live; wait for fresh encoder feedback')
-            if self.ui_mode == 'live' and not self.orientation_calibration.get('valid'):
-                # Camera rotation and inversion must be measured.  Do not guess
-                # from manual Normal/Reversed switches: start the two-axis
-                # mapping routine, which arms tracking only after it succeeds.
-                self.start_orientation_learning(self.soft_start_step_degrees)
-                return
+            if self.ui_mode in ('live', 'transfer') and not self.orientation_calibration.get('valid'):
+                # Learning improves the camera/mount transform, but it must not
+                # gate basic tracking.  Start with the display-span scale and
+                # conventional camera axes; the live sanity monitor reverses
+                # the correction if observed error grows after mount motion.
+                # This provisional transform is deliberately not persisted.
+                self.orientation_calibration = {
+                    'status': 'provisional',
+                    'valid': True,
+                    'provisional': True,
+                    'inverse_degrees_per_pixel': [
+                        [self.hil_display_span_degrees / max(1, self.width), 0.0],
+                        [0.0, self.hil_display_span_degrees / max(1, self.height)]],
+                    'message': ('Tracking started with a provisional camera-to-mount '
+                                'mapping; Learn can refine it later.')}
             if not status.get('local_reference_set'):
                 self.hil_controller.reference(180, 0)
             self.hil_controller.arm()
             self.hil_enabled = True
             self.hil_error = None
-            self.soft_start_ramp_started = time.monotonic()
+            self.soft_start_ramp_started = None
             self.orientation_history.clear()
             self.orientation_sanity = {'status': 'monitoring', 'message': None}
         else:
@@ -878,6 +1304,61 @@ class VisionDashboardEngine:
             self.soft_start_ramp_started = None
             self.orientation_history.clear()
             self.orientation_sanity = {'status': 'idle', 'message': None}
+
+    def manual_jog(self, axis, direction, rate):
+        """Start/renew immediate operator jogging without optical calibration."""
+        if not self.hil_controller:
+            raise ValueError('Motor link is not connected; use Recover Bridge and Motor Link')
+        axis_id = {'azimuth': 0x10, 'elevation': 0x11}.get(str(axis).lower())
+        if axis_id is None:
+            raise ValueError('Manual jog axis must be azimuth or elevation')
+        if self.hil_enabled:
+            self.set_hil_enabled(False)
+        self.hil_controller.manual_jog(axis_id, int(direction), int(rate), 2.0)
+        self.hil_error = None
+
+    def manual_stop(self):
+        """Priority manual Stop; safe to call when the link is unavailable."""
+        self.hil_enabled = False
+        if self.hil_controller:
+            self.hil_controller.manual_stop()
+
+    def zero_encoder_marker(self):
+        """Put the current encoder position at the display center reference.
+
+        This changes only the controller's relative session reference. It does
+        not write raw motor encoders or establish celestial alignment. Active
+        optical correction is briefly frozen, while the Bridge link and the
+        operator's armed tracking request are retained.
+        """
+        if not self.hil_controller:
+            raise ValueError('Motor link is not connected; use Recover Bridge and Motor Link')
+        status = self.hil_controller.status()
+        if status.get('connection') != 'live':
+            raise ValueError('Fresh motor feedback is required to zero the encoder marker')
+        self.hil_reference_rebasing = True
+        try:
+            self.hil_controller.freeze()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                status = self.hil_controller.status()
+                if status.get('motion') in ('idle', 'paused', 'stale_target_stopped'):
+                    break
+                time.sleep(.02)
+            else:
+                raise RuntimeError('Motor motion did not pause; encoder marker was not changed')
+            self.hil_controller.reference(180, 0)
+            self.hil_previous_target = None
+            self.hil_current_target = None
+            self.hil_last_visible_target = None
+            self.hil_target_rate = None
+            self.hil_last_locked_marker = {
+                'azimuth_degrees': 180.0, 'elevation_degrees': 0.0,
+                'utc_epoch_s': time.time()}
+            self.hil_error = ('Encoder marker zeroed at the center cross. This is a '
+                              'relative session reference, not telescope alignment.')
+        finally:
+            self.hil_reference_rebasing = False
 
     def _run_when_motor_link_live(self, action, step=None, rate=None):
         """Reconnect stale motor feedback, then perform the requested action."""
@@ -930,6 +1411,16 @@ class VisionDashboardEngine:
     def request_orientation_learning(self, step=None, rate=None):
         self._run_when_motor_link_live('learn', step, rate)
 
+    def abort_orientation_learning(self):
+        thread = self.orientation_calibration_thread
+        if not (thread and thread.is_alive()):
+            raise ValueError('No learning sequence is running')
+        self.orientation_cancel.set()
+        self.hil_enabled = False
+        if self.hil_controller:
+            self.hil_controller.pause()
+        self.hil_error = 'Learning abort requested; Stop sent and Bridge link retained.'
+
     def set_hil_dispatch_rate(self, value):
         if not self.hil_controller:
             raise ValueError('Hardware-loop mode was not enabled at launch')
@@ -937,6 +1428,12 @@ class VisionDashboardEngine:
             raise ValueError('Turn motor output OFF before changing dispatch rate')
         self.hil_controller.set_dispatch_rate(value)
         self.hil_dispatch_rate_hz = self.hil_controller.dispatch_rate_hz
+
+    def set_hil_feedback_timeout(self, value):
+        if not self.hil_controller:
+            raise ValueError('Hardware-loop mode was not enabled at launch')
+        self.hil_controller.set_feedback_timeout(value)
+        self.hil_feedback_timeout_seconds = self.hil_controller.feedback_timeout
 
     def set_hil_display_span(self, value):
         value = float(value)
@@ -1079,12 +1576,19 @@ class VisionDashboardEngine:
 
     def set_operating_mode(self, mode):
         if self.hil_enabled:
-            raise ValueError('Turn tracking output OFF before changing Live/Demo mode')
-        if mode not in ('live', 'demo'):
-            raise ValueError('Select Live Mode or Demo Mode')
+            # A mode button must remain actionable. Stop active tracking before
+            # changing its source instead of trapping the operator in a mode.
+            self.set_hil_enabled(False)
+        if mode not in ('live', 'hybrid', 'transfer', 'demo'):
+            raise ValueError('Select Live, Hybrid Camera, Transfer-Function, or Demo Mode')
         self.ui_mode = mode
+        # Hybrid and Transfer-Function Test deliberately keep the physical
+        # camera capture draining. Their synthetic targets replace detector
+        # output for control, but the live background exposes CSI/USB capture
+        # failures that occur only while the mount is moving.
         self.desired_source = (('picamera2' if str(self.device).startswith('picamera2:')
-                                else 'v4l2') if mode == 'live' else 'synthetic')
+                                else 'v4l2')
+                               if mode in ('live', 'hybrid', 'transfer') else 'synthetic')
         self.aim_mode = 'center'
         self.aim_point = (.5, .5)
         self.feature_tracker = None
@@ -1099,12 +1603,15 @@ class VisionDashboardEngine:
         self.hil_current_target = None
         self.hil_commanded_target = None
         self.hil_error = None
+        self.transfer_encoder_origin = None
+        self.transfer_path_started = time.monotonic()
+        self.transfer_frozen_path = None
         self._invalidate_orientation('Operating mode changed; soft start must be relearned.')
         self._load_orientation_profile()
+        if not (self.thread and self.thread.is_alive()):
+            self.start()
 
     def set_aim_mode(self, mode):
-        if self.hil_enabled:
-            raise ValueError('Turn tracking output OFF before changing the aim point')
         if mode not in ('center', 'hold'):
             raise ValueError('Select Center target or Hold current frame position')
         self.aim_mode = mode
@@ -1117,13 +1624,20 @@ class VisionDashboardEngine:
                               self.last_selected['y'] / height)
 
     def set_image_orientation(self, horizontal, vertical):
-        if self.hil_enabled:
-            raise ValueError('Turn tracking output OFF before changing image orientation')
         if horizontal not in ('normal', 'reversed') or vertical not in ('normal', 'reversed'):
             raise ValueError('Image orientation must be Normal or Reversed for each axis')
+        requested = (horizontal == 'reversed', vertical == 'reversed')
+        if requested == (self.image_horizontal_reversed,
+                         self.image_vertical_reversed):
+            return
+        if self.hil_enabled:
+            self.set_hil_enabled(False)
         self.image_horizontal_reversed = horizontal == 'reversed'
         self.image_vertical_reversed = vertical == 'reversed'
-        self._invalidate_orientation('Manual image direction changed; soft start must be relearned.')
+        self.clear_target()
+        self._invalidate_orientation(
+            'Preview orientation changed; select the feature again and relearn motor mapping.')
+        self._load_orientation_profile()
         self.orientation_history.clear()
         self.orientation_sanity = {'status': 'idle', 'message': None}
 
@@ -1140,12 +1654,22 @@ class VisionDashboardEngine:
             with self.lock:
                 samples = [item for item in self.feature_samples if item[0] >= after]
                 selected = self.last_selected
-            if selected and len(samples) >= 4:
-                recent = samples[-4:]
-                return (sum(item[1] for item in recent) / len(recent),
-                        sum(item[2] for item in recent) / len(recent))
+            if selected and len(samples) >= 6:
+                recent = samples[-6:]
+                center_x = float(np.median([item[1] for item in recent]))
+                center_y = float(np.median([item[2] for item in recent]))
+                spread = max(math.hypot(item[1] - center_x,
+                                        item[2] - center_y)
+                             for item in recent)
+                box = selected.get('bbox') or [0, 0, 20, 20]
+                allowed_spread = max(1.5, min(5.0,
+                    math.hypot(float(box[2]), float(box[3])) * .08))
+                if spread <= allowed_spread:
+                    return center_x, center_y
             time.sleep(.04)
-        raise RuntimeError('Feature lock was not stable during soft start')
+        raise RuntimeError(
+            'Feature lock centroid was unstable or jumped during learning; '
+            'reacquire a distinctive feature and retry')
 
     def _reseed_feature_at(self, point):
         """Recreate the feature tracker at a known pixel after a probe return."""
@@ -1215,7 +1739,16 @@ class VisionDashboardEngine:
             time.sleep(.20)
 
     def _return_to_probe_start_rate(self, baseline, baseline_px, rate):
-        """Return both encoder references slowly, then re-seed the original ROI."""
+        """Return both encoder references at the selected bounded calibration rate.
+
+        Earlier builds forced every return to rate 2.  A sequence of rejected
+        probes can accumulate more than a degree of travel, and the COSMOS 90GT
+        may not cover that distance at rate 2 before the bounded probe timeout.
+        That left learning failed during cleanup even though the outward probe
+        worked.  Use the operator-selected calibration rate for the return too;
+        the encoder target still bounds travel and ``finally`` always freezes
+        both motors.
+        """
         for axis, motor in enumerate(('Azimuth', 'Elevation')):
             status = self.hil_controller.status()
             current = status.get('positions', {}).get(motor, {}).get('reference_degrees')
@@ -1226,12 +1759,136 @@ class VisionDashboardEngine:
             if abs(difference) >= .01:
                 self._rate_axis_displacement(
                     axis, 1 if difference > 0 else -1, abs(difference),
-                    min(int(rate), 2), require_feature=False)
+                    int(rate), require_feature=False)
         self._reseed_feature_at(baseline_px)
         return self._stable_feature_sample(time.monotonic(), timeout=4)
 
+    def _characterize_axis_backlash(self, axis, baseline, baseline_px,
+                                    slew_rate, trial_count=3):
+        """Measure encoder dead travel after reversals using image response.
+
+        The axis is first loaded opposite the trial direction.  It is then
+        reversed through 0.02-degree encoder increments while settled feature
+        displacement is sampled.  A flat-plus-linear breakpoint is fitted per
+        trial and the median of three alternating-direction trials becomes the
+        take-up distance used by the mapping probe.
+        """
+        motor = 'Azimuth' if axis == 0 else 'Elevation'
+        load_distance = .08
+        increment = .02
+        maximum_sweep = .20
+        trial_samples = []
+        trial_records = []
+        accepted_directions = []
+        maximum_attempts = max(int(trial_count), 5)
+        for attempt_number in range(maximum_attempts):
+            if len(trial_samples) >= int(trial_count):
+                break
+            direction = 1 if attempt_number % 2 == 0 else -1
+            samples = []
+            pixel_points = []
+            try:
+                self.orientation_calibration.update(
+                    message=(f'{motor} backlash attempt {attempt_number + 1}/'
+                             f'{maximum_attempts} ({len(trial_samples)}/'
+                             f'{trial_count} accepted): loading gears…'),
+                    phase=f'{motor.lower()} backlash characterization')
+                self._rate_axis_displacement(
+                    axis, -direction, load_distance, slew_rate,
+                    require_feature=True)
+                reversal_px = self._stable_feature_sample(
+                    time.monotonic(), timeout=2.5)
+                reversal_status = self.hil_controller.status()
+                reversal_encoder = reversal_status['positions'][motor]['encoder']
+                samples.append((0.0, 0.0))
+                pixel_points.append((0.0, 0.0))
+                box_width, box_height = self.feature_initial_size or (40, 40)
+                jump_limit = max(12.0, math.hypot(
+                    float(box_width), float(box_height)) * .55)
+                for sample_number in range(round(maximum_sweep / increment)):
+                    if self.orientation_cancel.is_set():
+                        raise RuntimeError('Soft start canceled; motor output remains OFF')
+                    self._rate_axis_displacement(
+                        axis, direction, increment, slew_rate,
+                        require_feature=True)
+                    point = self._stable_feature_sample(
+                        time.monotonic(), timeout=2.5)
+                    status = self.hil_controller.status()
+                    encoder = status['positions'][motor]['encoder']
+                    encoder_degrees = abs(wrapped_encoder_delta(
+                        encoder, reversal_encoder) * 360 / (1 << 24))
+                    pixel_distance = math.hypot(
+                        point[0] - reversal_px[0], point[1] - reversal_px[1])
+                    pixel_vector = (point[0] - reversal_px[0],
+                                    point[1] - reversal_px[1])
+                    previous_point = pixel_points[-1]
+                    incremental_jump = math.hypot(
+                        pixel_vector[0] - previous_point[0],
+                        pixel_vector[1] - previous_point[1])
+                    if incremental_jump > jump_limit:
+                        raise RuntimeError(
+                            f'Feature lock jumped {incremental_jump:.1f} px '
+                            f'(limit {jump_limit:.1f} px)')
+                    if (samples and pixel_distance + 3 < samples[-1][1] and
+                            samples[-1][1] >= 4):
+                        raise RuntimeError(
+                            'Feature path reversed during a one-direction '
+                            'backlash sweep; probable lock hunt')
+                    samples.append((encoder_degrees, pixel_distance))
+                    pixel_points.append(pixel_vector)
+                    self.orientation_calibration.update(
+                        message=(f'{motor} backlash attempt {attempt_number + 1}/'
+                                 f'{maximum_attempts}: {encoder_degrees:.3f}\u00b0 encoder, '
+                                 f'{pixel_distance:.1f} px response…'))
+                final_vector = pixel_points[-1]
+                final_magnitude = math.hypot(*final_vector)
+                if final_magnitude < 3:
+                    raise RuntimeError('No coherent optical movement followed encoder sweep')
+                normalized_direction = (
+                    direction * final_vector[0] / final_magnitude,
+                    direction * final_vector[1] / final_magnitude)
+                if accepted_directions:
+                    agreement = min(
+                        normalized_direction[0] * item[0] +
+                        normalized_direction[1] * item[1]
+                        for item in accepted_directions)
+                    if agreement < .70:
+                        raise RuntimeError(
+                            f'Feature direction disagreed with earlier trials '
+                            f'(cosine {agreement:.2f}); probable lock jump')
+                # Reject a noisy/nonlinear response now so the bounded attempt
+                # budget can automatically collect a replacement trial.
+                single_fit = estimate_backlash_breakpoint(
+                    [samples], minimum_trials=1)
+                trial_samples.append(samples)
+                accepted_directions.append(normalized_direction)
+                trial_records.append({
+                    'accepted': True,
+                    'attempt': attempt_number + 1,
+                    'direction': direction,
+                    'fit': single_fit['trial_fits'][0],
+                    'samples': [{'encoder_degrees': item[0],
+                                 'pixel_distance': item[1]} for item in samples]})
+            except (ConnectionError, KeyError, RuntimeError, ValueError) as error:
+                trial_records.append({'accepted': False,
+                    'attempt': attempt_number + 1, 'direction': direction, 'samples': [
+                    {'encoder_degrees': item[0], 'pixel_distance': item[1]}
+                    for item in samples], 'error': str(error)})
+            finally:
+                self._return_to_probe_start_rate(
+                    baseline, baseline_px, slew_rate)
+        if len(trial_samples) < int(trial_count):
+            raise RuntimeError(
+                f'{motor} learning accepted only {len(trial_samples)} of '
+                f'{maximum_attempts} backlash attempts. The feature lock '
+                'jumped or was too noisy; reacquire a distinctive feature and retry.')
+        estimate = estimate_backlash_breakpoint(trial_samples)
+        estimate['trials'] = trial_records
+        estimate['axis'] = motor
+        return estimate
+
     def _adaptive_axis_probe(self, axis, baseline, baseline_counts, baseline_px,
-                             requested_step, slew_rate):
+                             requested_step, slew_rate, backlash_degrees):
         """Measure one axis while preferring movement toward frame center.
 
         An edge feature can disappear if the first guessed motor direction is
@@ -1259,30 +1916,71 @@ class VisionDashboardEngine:
         direction = 1
         for attempt_number in range(8):
             try:
+                # The repeated reversal routine estimates the encoder-only
+                # region. Preload just beyond that breakpoint, settle, then
+                # establish the actual pixel/encoder measurement baseline.
+                takeup_distance = max(.02, min(.25,
+                                               float(backlash_degrees) + .01))
+                self.orientation_calibration.update(
+                    message=(f'{"Azimuth" if axis == 0 else "Elevation"} '
+                             f'backlash take-up {takeup_distance:.3f}\u00b0; '
+                             'measured probe follows after settling…'),
+                    phase=('azimuth backlash take-up' if axis == 0 else
+                           'elevation backlash take-up'))
+                self._rate_axis_displacement(
+                    axis, direction, takeup_distance, slew_rate,
+                    require_feature=True)
+                takeup_px = self._stable_feature_sample(
+                    time.monotonic(), timeout=2.5)
+                takeup_status = self.hil_controller.status()
+                if takeup_status.get('connection') != 'live':
+                    raise RuntimeError(
+                        'Encoder feedback was not live after backlash take-up')
+                motor = 'Azimuth' if axis == 0 else 'Elevation'
+                takeup_encoder = takeup_status['positions'][motor]['encoder']
+                takeup_counts = wrapped_encoder_delta(
+                    takeup_encoder, baseline_counts[axis])
+                takeup_pixel_motion = math.hypot(
+                    takeup_px[0] - baseline_px[0],
+                    takeup_px[1] - baseline_px[1])
                 status = self._rate_axis_displacement(
                     axis, direction, step, slew_rate, require_feature=True)
                 moved_px = self._stable_feature_sample(time.monotonic(), timeout=2.5)
-                vector = (moved_px[0] - baseline_px[0],
-                          moved_px[1] - baseline_px[1])
+                # Pair the settled image measurement with an encoder reading
+                # taken after the same stop/settling interval.  The status
+                # returned by _rate_axis_displacement is the threshold-crossing
+                # sample from just before its finally block freezes the motors;
+                # using it inflated learned px/degree values when the gear
+                # train coasted slightly during the bounded settle delay.
+                status = self.hil_controller.status()
+                if status.get('connection') != 'live':
+                    raise RuntimeError('Encoder feedback was not live after the probe settled')
+                vector = (moved_px[0] - takeup_px[0],
+                          moved_px[1] - takeup_px[1])
                 pixel_motion = math.hypot(*vector)
+                measurement_error = (takeup_px[0] - center[0],
+                                     takeup_px[1] - center[1])
+                measurement_distance = math.hypot(*measurement_error)
                 moved_error = (moved_px[0] - center[0], moved_px[1] - center[1])
                 moved_distance = math.hypot(*moved_error)
-                crossed_center = (baseline_error[0] * moved_error[0] < 0 or
-                                  baseline_error[1] * moved_error[1] < 0)
+                crossed_center = (measurement_error[0] * moved_error[0] < 0 or
+                                  measurement_error[1] * moved_error[1] < 0)
                 overshot = (crossed_center and moved_distance >
-                             max(8, baseline_distance * .35))
+                             max(8, measurement_distance * .35))
                 outward = (near_edge and moved_distance >
-                           baseline_distance + max(3, pixel_motion * .10))
+                           measurement_distance + max(3, pixel_motion * .10))
                 attempts.append({'direction': direction, 'step_degrees': step,
+                                 'backlash_takeup_degrees': takeup_distance,
+                                 'backlash_takeup_encoder_counts': takeup_counts,
+                                 'backlash_takeup_pixel_motion': takeup_pixel_motion,
                                  'pixel_motion': pixel_motion,
-                                 'distance_before_px': baseline_distance,
+                                 'distance_before_px': measurement_distance,
                                  'distance_after_px': moved_distance,
                                  'result': ('overshoot' if overshot else
                                             'outward' if outward else 'accepted')})
                 if pixel_motion >= 3 and not outward and not overshot:
-                    motor = 'Azimuth' if axis == 0 else 'Elevation'
                     encoder = status['positions'][motor]['encoder']
-                    counts = wrapped_encoder_delta(encoder, baseline_counts[axis])
+                    counts = wrapped_encoder_delta(encoder, takeup_encoder)
                     measured_step = counts * 360 / (1 << 24)
                     if abs(measured_step) < .003:
                         raise RuntimeError('Probe motor displacement was too small to measure')
@@ -1379,17 +2077,29 @@ class VisionDashboardEngine:
                 phase='azimuth probe')
             before_time = time.monotonic()
             baseline_px = self._stable_feature_sample(before_time)
+            self.orientation_calibration.update(
+                message='Characterizing azimuth backlash from repeated reversals…',
+                phase='azimuth backlash characterization')
+            az_backlash = self._characterize_axis_backlash(
+                0, baseline, baseline_px, slew_rate)
             az_status, az_vector, az_counts, az_step, az_attempts = (
                 self._adaptive_axis_probe(0, baseline, baseline_counts,
-                                          baseline_px, step, slew_rate))
+                                          baseline_px, step, slew_rate,
+                                          az_backlash['degrees']))
             self._return_to_probe_start_rate(baseline, baseline_px, slew_rate)
 
             self.orientation_calibration.update(
-                message='Measuring elevation pixel direction…', phase='elevation probe')
+                message='Characterizing elevation backlash from repeated reversals…',
+                phase='elevation backlash characterization')
             baseline_px = self._stable_feature_sample(time.monotonic())
+            el_backlash = self._characterize_axis_backlash(
+                1, baseline, baseline_px, slew_rate)
+            self.orientation_calibration.update(
+                message='Measuring elevation pixel direction…', phase='elevation probe')
             el_status, el_vector, el_counts, el_step, el_attempts = (
                 self._adaptive_axis_probe(1, baseline, baseline_counts,
-                                          baseline_px, step, slew_rate))
+                                          baseline_px, step, slew_rate,
+                                          el_backlash['degrees']))
             self._return_to_probe_start_rate(baseline, baseline_px, slew_rate)
 
             learned = learn_pixel_mount_transform(az_vector, el_vector,
@@ -1397,30 +2107,57 @@ class VisionDashboardEngine:
             learned.update(encoder_delta_counts=[az_counts, el_counts],
                            adaptive_probe_attempts={
                                'azimuth': az_attempts, 'elevation': el_attempts},
+                           backlash_characterization={
+                               'azimuth': az_backlash,
+                               'elevation': el_backlash},
                            pixels_per_encoder_count=[
                                math.hypot(*az_vector) / abs(az_counts),
                                math.hypot(*el_vector) / abs(el_counts)])
-            learned.update(status='learned', valid=True,
-                           message='Camera orientation learned; tracking authority is ramping up slowly.')
+            learned.update(
+                status='learned', valid=True,
+                message=(('Artificial transfer function learned and saved; '
+                          if self.ui_mode == 'transfer' else
+                          'Camera orientation learned and saved; ') +
+                         'telescope returned to its starting position. '
+                         'Press Motor Output ON to track.'))
             with self.lock:
                 self.orientation_calibration = learned
                 self._save_orientation_profile(learned)
-                self.soft_start_ramp_started = time.monotonic()
+                self.soft_start_ramp_started = None
                 self.hil_error = None
-                if not self.last_selected:
-                    raise RuntimeError('Feature lock was lost before tracking could start')
-                controller.arm()
-                self.hil_enabled = True
+                self.hil_enabled = False
+                controller.pause()
         except (ConnectionError, KeyError, RuntimeError, ValueError) as error:
+            canceled = self.orientation_cancel.is_set()
             if self.hil_controller:
                 self.hil_controller.pause()
             with self.lock:
                 self.hil_enabled = False
                 self.hil_error = str(error)
-                self.orientation_calibration = {
-                    'status': 'failed', 'valid': False, 'message': str(error)}
+                if canceled:
+                    self._load_orientation_profile()
+                    if self.orientation_calibration.get('valid'):
+                        self.orientation_calibration.update(
+                            status='loaded',
+                            message=('Learning aborted; previous saved mapping restored. '
+                                     'Bridge link remains available.'))
+                    else:
+                        self.orientation_calibration = {
+                            'status': 'aborted', 'valid': False,
+                            'message': 'Learning aborted; no saved mapping is available.'}
+                else:
+                    self.orientation_calibration = {
+                        'status': 'failed', 'valid': False, 'message': str(error)}
         finally:
-            if baseline and self.hil_controller and not self.orientation_calibration.get('valid'):
+            # A learning failure must never leave the last rate command active.
+            # Freeze before attempting the optional return and freeze again
+            # afterward.  This retains the warm Bridge client; it does not tear
+            # down or restart the shared telescope connection.
+            if self.hil_controller:
+                self.hil_controller.freeze()
+            if (baseline and self.hil_controller
+                    and not self.orientation_calibration.get('valid')
+                    and not self.orientation_cancel.is_set()):
                 try:
                     self.orientation_cancel.clear()
                     self._return_to_probe_start_rate(
@@ -1428,11 +2165,13 @@ class VisionDashboardEngine:
                         (self.width / 2, self.height / 2), slew_rate)
                 except (ConnectionError, RuntimeError, ValueError):
                     self.hil_controller.pause()
+            if self.hil_controller:
+                self.hil_controller.freeze()
             self.orientation_cancel.clear()
 
     def start_orientation_learning(self, step=None, rate=None):
-        if not self.hil_controller or self.ui_mode != 'live':
-            raise ValueError('Soft start requires Live Mode and a configured motor link')
+        if not self.hil_controller or self.ui_mode not in ('live', 'transfer'):
+            raise ValueError('Learning requires Live or Transfer-Function Test mode and a motor link')
         if self.hil_enabled:
             raise ValueError('Turn tracking output OFF before relearning camera orientation')
         if not self.last_selected:
@@ -1462,20 +2201,70 @@ class VisionDashboardEngine:
         self.orientation_calibration_thread.start()
 
     def set_feature_point(self, x, y, box_fraction=.12):
-        if self.hil_enabled:
-            raise ValueError('Turn tracking output OFF before selecting a new feature')
         x, y, box_fraction = map(float, (x, y, box_fraction))
         if (not 0 <= x <= 1 or not 0 <= y <= 1
                 or not .03 <= box_fraction <= .30):
             raise ValueError('Select a point inside the video; lock box must be 3–30%')
         self.tracking_mode = 'feature-roi'
-        self.feature_algorithm = 'CSRT'
         self.feature_lock_size = True
         half = box_fraction / 2
         left = max(0, min(1 - box_fraction, x - half))
         top = max(0, min(1 - box_fraction, y - half))
         self.set_feature_roi(left, top, box_fraction, box_fraction)
         self.aim_point = ((.5, .5) if self.aim_mode == 'center' else (x, y))
+
+    def set_manual_lock_hold(self, active, x=None, y=None, box_fraction=.12):
+        """Pin the visual lock under the pointer without dropping motor authority."""
+        if active:
+            x, y, box_fraction = map(float, (x, y, box_fraction))
+            if (not 0 <= x <= 1 or not 0 <= y <= 1 or
+                    not .03 <= box_fraction <= .30):
+                raise ValueError('Manual lock hold must remain inside the video')
+            if (not self.manual_lock_hold or
+                    not self.manual_lock_hold.get('active')):
+                self.manual_lock_hold_generation += 1
+            self.manual_lock_hold = {
+                'active': True, 'x': x, 'y': y,
+                'box_fraction': box_fraction,
+                'started_monotonic': (self.manual_lock_hold or {}).get(
+                    'started_monotonic', time.monotonic())}
+            self.hil_previous_target = None
+            if self.hil_controller:
+                self.hil_controller.freeze()
+            self.hil_error = ('PURPLE MANUAL LOCK HOLD — motor correction '
+                              'frozen; green automatic lock remains visible.')
+            return
+        held = self.manual_lock_hold
+        if not held:
+            return
+        x = held['x'] if x is None else float(x)
+        y = held['y'] if y is None else float(y)
+        box_fraction = held['box_fraction'] if box_fraction is None else float(box_fraction)
+        generation = self.manual_lock_hold_generation
+        self.manual_lock_hold = dict(
+            held, active=False, x=x, y=y, box_fraction=box_fraction,
+            release_pending=True, released_monotonic=time.monotonic(),
+            apply_delay_seconds=1.0)
+        self.hil_error = ('Purple manual point released; one-second confirmation '
+                          'window before it replaces the green automatic lock.')
+
+        def apply_after_confirmation():
+            with self.lock:
+                held_now = self.manual_lock_hold
+                if (generation != self.manual_lock_hold_generation or
+                        not held_now or held_now.get('active')):
+                    return
+                final_x, final_y = held_now['x'], held_now['y']
+                final_size = held_now['box_fraction']
+                self.manual_lock_hold = None
+                self.aim_mode = 'center'
+                self.set_feature_point(final_x, final_y, final_size)
+                self.hil_error = ('Purple point committed; initializing the '
+                                  'replacement green feature lock.')
+
+        timer = threading.Timer(1.0, apply_after_confirmation)
+        timer.daemon = True
+        timer.start()
 
     def clear_target(self):
         self.tracker.clear_selection()
@@ -1507,15 +2296,18 @@ class VisionDashboardEngine:
     def refresh_cameras(self):
         if self.hil_enabled:
             raise ValueError('Turn tracking output OFF before refreshing cameras')
-        self.cameras = enumerate_cameras()
+        self._start_camera_inventory()
         return self.cameras
 
     def recover_camera_service(self):
-        """Retry only camera capture; never replace the dashboard process."""
-        if self.camera_recovery_requested:
+        """Request capture reopen without taking the web dashboard offline."""
+        if self.camera_recovery_thread and self.camera_recovery_thread.is_alive():
             return
         self.camera_recovery_requested = True
         self.camera_recovery_count += 1
+        self.camera_recovery_in_progress = True
+        self.camera_recovery_status = 'Request accepted; stopping and reopening camera capture.'
+        self.camera_recovery_result = None
         if self.hil_controller:
             try:
                 self.hil_controller.freeze()
@@ -1528,13 +2320,48 @@ class VisionDashboardEngine:
                 error=('Camera recovery requested. Motion is frozen; the motor '
                        'link and bridge remain active.'))
             self.frame_ready.notify_all()
-        if self.thread and self.thread.is_alive():
-            # The capture loop will reopen on its next iteration.  A driver
-            # timeout normally unwinds the thread first; if it has already
-            # done so, start a fresh capture worker below.
-            self.camera_reopen_requested = True
-        else:
-            self.start()
+        self.camera_reopen_requested = True
+        starting_frame = self.telemetry.get('frame', -1)
+
+        def worker():
+            deadline = time.monotonic() + 12
+            last_frame = starting_frame
+            advancing_frames = 0
+            try:
+                while time.monotonic() < deadline:
+                    if not (self.thread and self.thread.is_alive()):
+                        self.camera_recovery_status = (
+                            'Capture worker stopped; starting a fresh capture worker.')
+                        self.start()
+                    current_frame = self.telemetry.get('frame', -1)
+                    if current_frame != last_frame and current_frame >= 0:
+                        advancing_frames += 1
+                        last_frame = current_frame
+                    if advancing_frames >= 3:
+                        self.camera_recovery_status = (
+                            f'Camera recovered; {advancing_frames} advancing frames '
+                            f'confirmed through frame {current_frame}.')
+                        self.camera_recovery_result = 'recovered'
+                        return
+                    self.camera_recovery_status = (
+                        f'Confirming camera recovery: {advancing_frames} of 3 '
+                        'advancing frames received.')
+                    time.sleep(.2)
+                self.camera_reopen_requested = True
+                self.camera_recovery_status = (
+                    'No fresh frame yet. The dashboard remains online and the '
+                    'background camera worker will keep retrying with bounded backoff.')
+                self.camera_recovery_result = 'background retry active'
+            except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+                self.camera_recovery_status = str(error)
+                self.camera_recovery_result = 'failed'
+            finally:
+                self.camera_recovery_requested = False
+                self.camera_recovery_in_progress = False
+
+        self.camera_recovery_thread = threading.Thread(
+            target=worker, name='camera-recovery', daemon=True)
+        self.camera_recovery_thread.start()
 
     def set_camera(self, device, width, height, fps):
         if self.hil_enabled:
@@ -1559,8 +2386,6 @@ class VisionDashboardEngine:
 
     def set_camera_exposure(self, automatic, exposure_value=0,
                             exposure_time_us=10000, analogue_gain=1.0):
-        if self.hil_enabled:
-            raise ValueError('Turn tracking output OFF before changing camera exposure')
         automatic = bool(automatic)
         exposure_value = float(exposure_value)
         exposure_time_us = int(exposure_time_us)
@@ -1594,6 +2419,69 @@ class VisionDashboardEngine:
                      'AnalogueGain': analogue_gain})
         self.capture.set_controls(controls)
 
+    def set_camera_agc_lock(self, locked):
+        """Freeze the current auto-exposure result or return to automatic control."""
+        locked = bool(locked)
+        if locked:
+            self.camera_gain_locked = False
+            exposure = int(self.camera_metadata.get(
+                'ExposureTime', self.camera_manual_exposure_us))
+            gain = float(self.camera_metadata.get(
+                'AnalogueGain', self.camera_manual_gain))
+            self.set_camera_exposure(
+                False, self.camera_exposure_value, exposure, gain)
+        else:
+            self.camera_gain_locked = False
+            self.set_camera_exposure(
+                True, self.camera_exposure_value,
+                self.camera_manual_exposure_us, self.camera_manual_gain)
+
+    def set_camera_gain_lock(self, locked):
+        """Hold analogue gain while software continues adjusting exposure time."""
+        locked = bool(locked)
+        if locked:
+            exposure = int(self.camera_metadata.get(
+                'ExposureTime', self.camera_manual_exposure_us))
+            gain = float(self.camera_metadata.get(
+                'AnalogueGain', self.camera_manual_gain))
+            self.camera_gain_locked = True
+            self.set_camera_exposure(
+                False, self.camera_exposure_value, exposure, gain)
+            self.camera_gain_locked = True
+            self.camera_software_ae_last = 0.0
+        else:
+            self.camera_gain_locked = False
+            self.set_camera_exposure(
+                True, self.camera_exposure_value,
+                self.camera_manual_exposure_us, self.camera_manual_gain)
+
+    def _adjust_locked_gain_exposure(self, gray, now=None):
+        if not self.camera_gain_locked or not self.capture:
+            return
+        now = time.monotonic() if now is None else float(now)
+        if now - self.camera_software_ae_last < .5:
+            return
+        self.camera_software_ae_last = now
+        percentile = max(1.0, float(np.percentile(gray, 90)))
+        target = float(np.clip(128 * (2 ** (self.camera_exposure_value / 2)),
+                               24, 230))
+        ratio = target / percentile
+        if .92 <= ratio <= 1.08:
+            return
+        current = int(self.camera_metadata.get(
+            'ExposureTime', self.camera_manual_exposure_us))
+        limits = self.camera_control_ranges.get('ExposureTime', {})
+        minimum = int(limits.get('minimum', 1))
+        maximum = int(limits.get('maximum', 1000000))
+        step = float(np.clip(ratio ** .35, .75, 1.33))
+        exposure = int(np.clip(round(current * step), minimum, maximum))
+        if exposure == current:
+            return
+        self.camera_manual_exposure_us = exposure
+        self.capture.set_controls({
+            'AeEnable': False, 'ExposureTime': exposure,
+            'AnalogueGain': self.camera_manual_gain})
+
     def set_image_curve(self, black, white, gamma):
         black, white, gamma = int(black), int(white), float(gamma)
         if not 0 <= black < white <= 255 or not .2 <= gamma <= 3:
@@ -1609,26 +2497,151 @@ class VisionDashboardEngine:
         values = np.power(values, 1 / self.curve_gamma) * 255
         return cv2.LUT(gray, values.astype(np.uint8))
 
-    def set_hil_control_strategy(self, preset, horizon=.25, proportional=.2,
-                                 deadband=.03):
+    def _apply_image_orientation(self, gray):
+        """Transform pixels before preview, click selection and tracking."""
+        if self.image_horizontal_reversed and self.image_vertical_reversed:
+            return cv2.flip(gray, -1)
+        if self.image_horizontal_reversed:
+            return cv2.flip(gray, 1)
+        if self.image_vertical_reversed:
+            return cv2.flip(gray, 0)
+        return gray
+
+    def set_hil_control_strategy(self, preset, horizon=.05, proportional=.55,
+                                 derivative=.10, deadband=.02):
         if self.hil_enabled:
             raise ValueError('Turn motor output OFF before changing control strategy')
-        presets = {'off': (0.0, 0.0, 0.0), 'conservative': (.1, .1, .05),
-                   'balanced': (.25, .2, .03), 'aggressive': (.5, .35, .02)}
+        presets = {
+            # Off is the legacy full-error controller retained for comparison.
+            'off': (0.0, 1.0, 0.0, 0.0),
+            'conservative': (0.0, .35, .14, .03),
+            'balanced': (.05, .55, .10, .02),
+            'aggressive': (.10, .80, .05, .01),
+        }
         if preset in presets:
-            horizon, proportional, deadband = presets[preset]
+            horizon, proportional, derivative, deadband = presets[preset]
         elif preset == 'auto':
-            horizon, proportional, deadband = self.hil_auto_horizon, .15, .03
+            horizon, proportional, derivative, deadband = (
+                self.hil_auto_horizon, .55, .10, .02)
         elif preset != 'custom':
             raise ValueError('Select Off, Conservative, Balanced, Aggressive, Auto, or Custom')
-        horizon, proportional, deadband = map(float, (horizon, proportional, deadband))
+        horizon, proportional, derivative, deadband = map(
+            float, (horizon, proportional, derivative, deadband))
         if (not 0 <= horizon <= 1.5 or not 0 <= proportional <= 1
-                or not 0 <= deadband <= .5):
-            raise ValueError('Prediction horizon 0–1.5s, proportional lead 0–1, deadband 0–0.5°')
+                or not 0 <= derivative <= .5 or not 0 <= deadband <= .5):
+            raise ValueError(
+                'Prediction horizon 0–1.5s, position gain 0–1, '
+                'derivative damping 0–0.5s, deadband 0–0.5°')
         self.hil_control_preset = preset
         self.hil_prediction_horizon = horizon
         self.hil_proportional_lead = proportional
+        self.hil_derivative_damping = derivative
         self.hil_correction_deadband = deadband
+        self.hil_control_error_state = None
+        self.hil_filtered_error_rate = (0.0, 0.0)
+
+    def _damped_mount_correction(self, azimuth_error, elevation_error, now):
+        """Apply proportional approach, derivative braking and center deadband."""
+        azimuth_error, elevation_error = map(
+            float, (azimuth_error, elevation_error))
+        derivative_azimuth = derivative_elevation = 0.0
+        if self.hil_control_error_state:
+            previous_time, previous_azimuth, previous_elevation = (
+                self.hil_control_error_state)
+            delta_time = max(.02, min(1.0, float(now) - previous_time))
+            raw_azimuth = (azimuth_error - previous_azimuth) / delta_time
+            raw_elevation = (elevation_error - previous_elevation) / delta_time
+            derivative_azimuth = (.70 * self.hil_filtered_error_rate[0] +
+                                  .30 * raw_azimuth)
+            derivative_elevation = (.70 * self.hil_filtered_error_rate[1] +
+                                    .30 * raw_elevation)
+        self.hil_filtered_error_rate = (derivative_azimuth,
+                                        derivative_elevation)
+        self.hil_control_error_state = (
+            float(now), azimuth_error, elevation_error)
+
+        def axis(error, rate):
+            if abs(error) <= self.hil_correction_deadband:
+                return 0.0
+            correction = (self.hil_proportional_lead * error +
+                          self.hil_derivative_damping * rate)
+            # Derivative noise must not reverse an otherwise valid correction;
+            # braking may reduce it to zero, never drive away from the target.
+            if correction * error < 0:
+                correction = 0.0
+            return correction
+
+        correction = (axis(azimuth_error, derivative_azimuth),
+                      axis(elevation_error, derivative_elevation))
+        self.hil_control_terms = {
+            'raw_error_degrees': [azimuth_error, elevation_error],
+            'error_rate_degrees_per_second': [derivative_azimuth,
+                                              derivative_elevation],
+            'correction_degrees': list(correction),
+            'position_gain': self.hil_proportional_lead,
+            'derivative_damping_seconds': self.hil_derivative_damping,
+            'deadband_degrees': self.hil_correction_deadband,
+        }
+        return correction
+
+    def set_hil_max_tracking_slew(self, degrees_per_second):
+        degrees_per_second = float(degrees_per_second)
+        if (not math.isfinite(degrees_per_second)
+                or not .001 <= degrees_per_second <= 5):
+            raise ValueError('Maximum tracking correction rate must be 0.001–5 degrees per second')
+        self.hil_max_tracking_slew_deg_s = degrees_per_second
+
+    def set_initial_trajectory_learning(self, enabled, window_seconds=2.0):
+        if self.hil_enabled:
+            raise ValueError('Turn motor output OFF before changing initial trajectory learning')
+        window_seconds = float(window_seconds)
+        if window_seconds not in (1.0, 2.0, 3.0, 5.0, 10.0):
+            raise ValueError('Initial trajectory window must be 1, 2, 3, 5, or 10 seconds')
+        self.hil_initial_trajectory_enabled = bool(enabled)
+        self.hil_initial_trajectory_window = window_seconds
+        self.hil_initial_trajectory = {
+            'valid': False,
+            'message': ('Waiting for a stable locked feature while motor output is OFF.'
+                        if enabled else 'Initial trajectory learning is OFF.')}
+
+    def _update_initial_trajectory(self, selected, now):
+        if (not self.hil_initial_trajectory_enabled or self.hil_enabled or
+                not selected or self.ui_mode != 'live' or
+                not self.orientation_calibration.get('valid')):
+            return
+        window = self.hil_initial_trajectory_window
+        samples = [item for item in self.feature_samples
+                   if now - item[0] <= window]
+        if len(samples) < 8 or samples[-1][0] - samples[0][0] < window * .75:
+            self.hil_initial_trajectory = {
+                'valid': False, 'sample_count': len(samples),
+                'window_seconds': window,
+                'message': 'Collecting stable pre-motion feature trajectory…'}
+            return
+        times = np.asarray([item[0] - samples[0][0] for item in samples])
+        xs = np.asarray([item[1] for item in samples])
+        ys = np.asarray([item[2] for item in samples])
+        vx, x0 = np.polyfit(times, xs, 1)
+        vy, y0 = np.polyfit(times, ys, 1)
+        residual = np.hypot(xs - (vx * times + x0),
+                            ys - (vy * times + y0))
+        rms = float(np.sqrt(np.mean(residual ** 2)))
+        span = float(times[-1] - times[0])
+        path = float(math.hypot(vx, vy) * span)
+        confidence = max(0.0, min(1.0, 1.0 - rms / max(2.0, path)))
+        azimuth_rate, elevation_rate = learned_mount_delta(
+            float(vx), float(vy), self.orientation_calibration)
+        valid = confidence >= .60 and rms <= 5.0
+        self.hil_initial_trajectory = {
+            'valid': valid, 'sample_count': len(samples),
+            'window_seconds': window, 'observed_seconds': span,
+            'pixel_rate': {'x_px_s': float(vx), 'y_px_s': float(vy)},
+            'mount_rate': {'azimuth_deg_s': float(azimuth_rate),
+                           'elevation_deg_s': float(elevation_rate)},
+            'residual_rms_px': rms, 'confidence': confidence,
+            'message': (('Initial slow-motion trajectory ready.' if valid else
+                         'Initial trajectory was noisy; keep the lock still '
+                         'or reacquire and collect another window.'))}
 
     def _apply_outer_loop(self, desired, marker):
         azimuth, elevation = desired
@@ -1649,10 +2662,8 @@ class VisionDashboardEngine:
                 self.hil_auto_horizon = .9 * self.hil_auto_horizon + .1 * estimate
                 horizon = self.hil_auto_horizon
         rate = self.hil_target_rate or {'azimuth_deg_s': 0.0, 'elevation_deg_s': 0.0}
-        commanded_azimuth = (azimuth + rate['azimuth_deg_s'] * horizon
-                             + self.hil_proportional_lead * az_error)
-        commanded_elevation = (elevation + rate['elevation_deg_s'] * horizon
-                               + self.hil_proportional_lead * el_error)
+        commanded_azimuth = azimuth + rate['azimuth_deg_s'] * horizon
+        commanded_elevation = elevation + rate['elevation_deg_s'] * horizon
         if marker and abs(az_error) <= self.hil_correction_deadband:
             commanded_azimuth = marker['azimuth_degrees']
         if marker and abs(el_error) <= self.hil_correction_deadband:
@@ -1675,8 +2686,6 @@ class VisionDashboardEngine:
     def set_feature_roi(self, x, y, width, height):
         if self.tracking_mode != 'feature-roi':
             raise ValueError('Select Feature ROI tracking mode first')
-        if self.hil_enabled:
-            raise ValueError('Turn motor output OFF before selecting a new feature')
         frame_width = self.telemetry.get('width', self.width)
         frame_height = self.telemetry.get('height', self.height)
         values = [float(value) for value in (x, y, width, height)]
@@ -1694,6 +2703,14 @@ class VisionDashboardEngine:
         self.feature_tracker = None
         self.feature_selected_id = None
         self._reset_feature_guard(clear_reference=True)
+        # Clicking a new live feature is the recovery path after the previous
+        # feature leaves the frame. Keep the Bridge/motor link armed; the next
+        # frame initializes this replacement tracker while the control loop has
+        # no selected target and therefore cannot use the discarded feature.
+        self.hil_previous_target = None
+        self.hil_control_error_state = None
+        self.hil_filtered_error_rate = (0.0, 0.0)
+        self.hil_error = 'New optical target selected; initializing feature lock.'
 
     @staticmethod
     def _feature_detection(bbox, confidence=1.0):
@@ -1802,7 +2819,16 @@ class VisionDashboardEngine:
             return None
         tracker = create_feature_tracker(self.feature_algorithm,
                                          self.feature_lock_size)
-        initialized = tracker.init(feature_frame, bbox)
+        # OpenCV's Python bindings require native integer coordinates here.
+        # Template matching returns floats (and can return NumPy scalar types),
+        # which KCF rejects as an unparseable boundingBox.
+        bbox = tuple(int(round(float(value))) for value in bbox)
+        try:
+            initialized = tracker.init(feature_frame, bbox)
+        except (cv2.error, TypeError, ValueError) as error:
+            self.feature_error = f'Feature tracker could not accept reacquisition box: {error}'
+            self.feature_reacquire_confirmations = 0
+            return None
         if initialized is False:
             self.feature_reacquire_confirmations = 0
             return None
@@ -1813,26 +2839,92 @@ class VisionDashboardEngine:
         self.feature_reacquire_candidate = None
         self.feature_reacquire_confirmations = 0
         self.feature_similarity_baseline = max(.60, score)
+        self.feature_error = None
         self.feature_last_confirmed = (center[0], center[1], time.monotonic())
         return self._feature_detection(bbox, score)
 
     def _hil_update(self, selected, width, height):
         if not self.hil_controller:
-            return {'available': False, 'enabled': False,
-                    'description': 'Display-only mode; no motor endpoint was supplied.'}
+            if not (self.hil_host or self.hil_route_target):
+                return {'available': False, 'enabled': False,
+                        'description': 'Display-only mode; no motor endpoint was supplied.'}
+            return {
+                'available': True, 'enabled': False,
+                'host': self.hil_host, 'port': self.hil_port,
+                'route_target': self.hil_route_target,
+                'connection': ('recovering' if self.bridge_service_restart_in_progress
+                               else 'disconnected'),
+                'motion': 'idle', 'armed': False, 'marker': None,
+                'encoder_positions': {}, 'link_action_pending': self.hil_link_action,
+                'bridge': dict(
+                    self.bridge_status,
+                    dashboard_connection=('recovering' if self.bridge_service_restart_in_progress
+                                          else 'disconnected'),
+                    dashboard_reconnections=0,
+                    dashboard_manual_reconnects=self.bridge_manual_reconnects,
+                    service_restart_in_progress=self.bridge_service_restart_in_progress,
+                    service_restart_count=self.bridge_service_restart_count,
+                    service_restart_result=self.bridge_service_restart_result,
+                    dashboard_last_error=self.hil_error),
+                'error': self.hil_error,
+                'description': ('Motor endpoint is configured but its client is stopped. '
+                                'Use Recover Bridge and Motor Link.')}
         status = self.hil_controller.status()
         if (status.get('connection') == 'live'
                 and self.hil_error == 'Dashboard bridge connection restarted; waiting for both fresh encoders.'):
             self.hil_error = None
         marker = hil_marker_from_status(status, width, height,
                                         self.hil_display_span_degrees / 2)
+        feedback_live = status.get('feedback_live')
+        if feedback_live is None:
+            # Compatibility with older controller/status providers that did
+            # not expose encoder freshness independently of socket state.
+            feedback_live = status.get('connection') == 'live'
+        self._update_initial_trajectory(selected, time.monotonic())
         if self.hil_enabled:
-            if status.get('connection') != 'live':
-                self.hil_enabled = False
-                self.hil_controller.pause()
-                self.hil_error = 'Motor output stopped because encoder feedback is not live.'
+            if self.hil_reference_rebasing:
+                self.hil_controller.freeze()
+                self.hil_error = ('Rebasing the relative encoder marker at the center cross; '
+                                  'the motor link remains armed.')
+            elif self.manual_lock_hold:
+                self.hil_controller.freeze()
+                self.hil_error = ('PURPLE MANUAL LOCK HOLD — motor correction '
+                                  'frozen while the green automatic lock remains visible.')
+            elif status.get('connection') != 'live':
+                # A transient dashboard-to-Bridge interruption must not clear
+                # the operator's ON request.  The controller reconnects in its
+                # own worker; freeze target traffic while it does so, retain
+                # the armed UI state, and resume from fresh encoder feedback.
+                self.hil_controller.freeze()
+                self.hil_error = ('Motor link interrupted; corrections are frozen while the '
+                                  'Bridge connection recovers. Tracking remains ON.')
             else:
                 try:
+                    if not feedback_live:
+                        self.hil_error = (
+                            'Encoder watchdog: one or both replies are stale. The socket is '
+                            'still live, scheduled polling continues, and encoder confirmation '
+                            'does not gate target dispatch.')
+                    if not status.get('local_reference_set'):
+                        # PositionController intentionally clears local offsets
+                        # after reconnect because it cannot know whether the
+                        # telescope power-cycled.  In this optical session the
+                        # dashboard has a stronger continuity signal: the last
+                        # confirmed encoder-referenced optical lock. Restore
+                        # that local frame instead of disabling output.
+                        reference = self.hil_last_locked_marker
+                        if not reference and self.hil_current_target:
+                            reference = self.hil_current_target
+                        if reference:
+                            self.hil_controller.reference(
+                                reference['azimuth_degrees'],
+                                reference['elevation_degrees'])
+                            status = self.hil_controller.status()
+                            marker = hil_marker_from_status(
+                                status, width, height,
+                                self.hil_display_span_degrees / 2)
+                            self.hil_error = ('Motor feedback resumed; the last optical-session '
+                                              'reference was restored automatically.')
                     target_now = time.monotonic()
                     target = None
                     if selected:
@@ -1842,20 +2934,45 @@ class VisionDashboardEngine:
                                 'elevation_degrees': marker['elevation_degrees'],
                                 'utc_epoch_s': time.time()}
                         self.hil_return_started = None
-                        if self.ui_mode == 'live':
+                        if self.ui_mode in ('live', 'transfer'):
                             if not marker:
                                 raise RuntimeError('Fresh encoder feedback is required for optical corrections')
                             if not self.orientation_calibration.get('valid'):
-                                raise RuntimeError('Camera-to-mount mapping is not validated; run soft start')
+                                raise RuntimeError('Camera-to-mount mapping is unavailable')
                             anchor_x = self.aim_point[0] * width
                             anchor_y = self.aim_point[1] * height
-                            delta_azimuth, delta_elevation = learned_mount_delta(
-                                selected['x'] - anchor_x, selected['y'] - anchor_y,
-                                self.orientation_calibration)
-                            ramp_age = max(0, target_now - (self.soft_start_ramp_started
-                                                           or target_now))
-                            authority = min(1.0, .1 + .9 * ramp_age / 10)
-                            correction_limit = .01 + .14 * authority
+                            error_x = selected['x'] - anchor_x
+                            error_y = selected['y'] - anchor_y
+                            if self.ui_mode == 'transfer':
+                                delta_azimuth, delta_elevation = transfer_mount_delta(
+                                    error_x, error_y, self.transfer_function)
+                            else:
+                                delta_azimuth, delta_elevation = learned_mount_delta(
+                                    error_x, error_y, self.orientation_calibration)
+                            if self.ui_mode == 'live':
+                                delta_azimuth, delta_elevation = (
+                                    self._damped_mount_correction(
+                                        delta_azimuth, delta_elevation,
+                                        target_now))
+                                initial = self.hil_initial_trajectory
+                                if (self.hil_initial_trajectory_enabled and
+                                        initial.get('valid')):
+                                    lead_time = max(
+                                        1 / max(1.0, self.hil_dispatch_rate_hz),
+                                        self.hil_prediction_horizon)
+                                    rate = initial['mount_rate']
+                                    delta_azimuth += rate['azimuth_deg_s'] * lead_time
+                                    delta_elevation += rate['elevation_deg_s'] * lead_time
+                            # Convert the current pixel error with the measured
+                            # mapping, then use the damped live correction. The
+                            # step cap prevents calibration noise from turning
+                            # one frame into a multi-degree jump.
+                            # Limit the finite correction target sent on each
+                            # dispatch. This is software tracking authority in
+                            # degrees/second; it does not rewrite the mount's
+                            # native manual slew-rate table.
+                            correction_limit = (self.hil_max_tracking_slew_deg_s /
+                                                max(1.0, self.hil_dispatch_rate_hz))
                             magnitude = math.hypot(delta_azimuth, delta_elevation)
                             if magnitude > correction_limit:
                                 scale = correction_limit / magnitude
@@ -1878,7 +2995,8 @@ class VisionDashboardEngine:
                         self.hil_previous_target = (target_now, azimuth, elevation)
                         self.hil_last_visible_target = (target_now, azimuth, elevation)
                         target = (azimuth, elevation)
-                        self.hil_error = None
+                        if feedback_live:
+                            self.hil_error = None
                     elif (self.hil_loss_mode == 'predictive-coast'
                           and self.hil_last_visible_target and self.hil_target_rate
                           and target_now - self.hil_last_visible_target[0] <= self.hil_coast_seconds):
@@ -1910,10 +3028,7 @@ class VisionDashboardEngine:
                         if not status.get('armed'):
                             self.hil_controller.arm()
                         self.hil_sequence += 1
-                        ramping = (self.ui_mode == 'live' and self.soft_start_ramp_started
-                                   and target_now - self.soft_start_ramp_started < 10)
-                        commanded_target = (target if ramping else
-                                            self._apply_outer_loop(target, marker))
+                        commanded_target = self._apply_outer_loop(target, marker)
                         self.hil_controller.submit(
                             commanded_target[0], commanded_target[1],
                             self.hil_sequence, time.time(), ttl=.75)
@@ -1921,9 +3036,12 @@ class VisionDashboardEngine:
                                                    'elevation_degrees': target[1]}
                         self.hil_last_submit = target_now
                 except (ConnectionError, RuntimeError, ValueError) as error:
-                    self.hil_enabled = False
-                    self.hil_controller.pause()
-                    self.hil_error = str(error)
+                    # Keep the requested tracking state through recoverable
+                    # feedback/mapping interruptions. Freeze motion until the
+                    # next fresh cycle rather than forcing another user click.
+                    self.hil_controller.freeze()
+                    self.hil_error = (f'{error}; corrections are frozen and will retry while '
+                                      'tracking remains ON.')
         encoder_error = None
         if marker and self.hil_current_target:
             encoder_error = {
@@ -1934,15 +3052,25 @@ class VisionDashboardEngine:
             }
         return {'available': True, 'enabled': self.hil_enabled,
                 'host': self.hil_host, 'port': self.hil_port,
+                'route_target': self.hil_route_target,
                 'envelope_degrees': self.hil_envelope_degrees,
                 'travel_envelope_enabled': self.hil_envelope_degrees > 0,
                 'display_span_degrees': self.hil_display_span_degrees,
                 'dispatch_rate_hz': self.hil_dispatch_rate_hz,
+                'max_tracking_slew_deg_s': self.hil_max_tracking_slew_deg_s,
+                'feedback_poll_rate_hz': status.get(
+                    'configured_feedback_poll_rate_hz', 4),
+                'feedback_timeout_seconds': status.get(
+                    'feedback_timeout_seconds', self.hil_feedback_timeout_seconds),
                 'connection': status.get('connection'), 'motion': status.get('motion'),
+                'feedback_live': feedback_live,
                 'armed': status.get('armed'), 'marker': marker,
                 'encoder_positions': status.get('positions', {}),
                 'cycle_count': status.get('cycle_count'),
                 'cycle_overruns': status.get('cycle_overruns'),
+                'encoder_poll_count': status.get('encoder_poll_count'),
+                'runtime_rx_count': status.get('runtime_rx_count'),
+                'target_confirmation': status.get('target_confirmation'),
                 'last_achieved_cycle_rate_hz': status.get('last_achieved_cycle_rate_hz'),
                 'target_rate': self.hil_target_rate,
                 'current_target': self.hil_current_target,
@@ -1952,7 +3080,15 @@ class VisionDashboardEngine:
                                                 if self.hil_control_preset == 'auto'
                                                 else self.hil_prediction_horizon),
                 'proportional_lead': self.hil_proportional_lead,
+                'derivative_damping_seconds': self.hil_derivative_damping,
                 'correction_deadband_degrees': self.hil_correction_deadband,
+                'control_terms': self.hil_control_terms,
+                'initial_trajectory': dict(self.hil_initial_trajectory,
+                    enabled=self.hil_initial_trajectory_enabled,
+                    configured_window_seconds=self.hil_initial_trajectory_window),
+                'manual_lock_hold': (dict(self.manual_lock_hold)
+                                     if self.manual_lock_hold else None),
+                'reference_rebasing': self.hil_reference_rebasing,
                 'encoder_error': encoder_error,
                 'loss_mode': self.hil_loss_mode,
                 'coast_seconds': self.hil_coast_seconds,
@@ -2001,23 +3137,25 @@ class VisionDashboardEngine:
         mount_motion = math.hypot(az_motion, el_motion)
         if (old_error >= 8 and new_error >= old_error * 1.25
                 and mount_motion >= .02):
-            message = ('Optical error increased by more than 25% after measurable mount motion. '
-                       'Tracking output was stopped; relearn the camera-to-mount mapping.')
-            self.hil_enabled = False
-            self.hil_controller.pause()
-            self.hil_error = message
-            self._discard_saved_orientation()
-            self.orientation_calibration = {
-                'status': 'invalidated', 'valid': False,
-                'message': ('Previous mapping diverged and was discarded. The mount is returning '
-                            'to the last confirmed lock position; run soft start again.')}
-            self.orientation_sanity = {'status': 'fault', 'message': message}
-            hil['enabled'] = False
-            hil['armed'] = False
-            hil['error'] = message
+            if not self.orientation_auto_reversed:
+                inverse = self.orientation_calibration.get('inverse_degrees_per_pixel')
+                if inverse:
+                    self.orientation_calibration['inverse_degrees_per_pixel'] = [
+                        [-float(value) for value in row] for row in inverse]
+                    self.orientation_auto_reversed = True
+                    message = ('Error increased after mount motion; correction direction was '
+                               'reversed automatically and tracking remains ON.')
+                    self.orientation_calibration.update(
+                        status='auto-corrected', valid=True, message=message)
+                    self.hil_error = message
+                    self.orientation_sanity = {'status': 'auto-corrected',
+                                               'message': message}
+            else:
+                message = ('Error is still increasing after automatic direction reversal; '
+                           'tracking remains ON. Use OFF if the feature leaves the frame.')
+                self.hil_error = message
+                self.orientation_sanity = {'status': 'warning', 'message': message}
             self.orientation_history.clear()
-            threading.Thread(target=self._return_to_last_lock_after_fault,
-                             name='orientation-fault-return', daemon=True).start()
 
     def _record(self, telemetry, selected):
         if self.record_requested and not self.record_writer:
@@ -2037,6 +3175,26 @@ class VisionDashboardEngine:
             telemetry['capture_fps'], telemetry['processing_ms']))
 
     def _run(self):
+        """Supervise capture without coupling camera health to HTTP availability."""
+        retry_delay = 1.0
+        while not self.stop_event.is_set():
+            starting_frame = int(self.telemetry.get('frame', -1) or -1)
+            self._capture_once()
+            if self.stop_event.is_set():
+                break
+            ending_frame = int(self.telemetry.get('frame', -1) or -1)
+            if ending_frame != starting_frame and ending_frame >= 0:
+                retry_delay = 1.0
+            else:
+                retry_delay = min(15.0, retry_delay * 1.7)
+            self.camera_recovery_status = (
+                f'Camera offline; background retry in {retry_delay:.1f} seconds. '
+                'The web dashboard and motor-link controls remain available.')
+            self.camera_recovery_result = 'background retry active'
+            if self.stop_event.wait(retry_delay):
+                break
+
+    def _capture_once(self):
         started = time.monotonic()
         frame_index = 0
         consecutive_capture_timeouts = 0
@@ -2091,7 +3249,9 @@ class VisionDashboardEngine:
                     if not ok:
                         raise RuntimeError('Camera/video source stopped returning frames')
                     gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                self._adjust_locked_gain_exposure(gray, cycle)
                 gray = self._apply_image_curve(gray)
+                gray = self._apply_image_orientation(gray)
                 height, width = gray.shape[:2]
                 with self.lock:
                     if self.tracking_mode == 'threshold':
@@ -2102,18 +3262,28 @@ class VisionDashboardEngine:
                         if self.feature_roi_pending:
                             self.feature_tracker = create_feature_tracker(
                                 self.feature_algorithm, self.feature_lock_size)
-                            roi = self.feature_roi_pending
+                            roi = tuple(int(round(float(value)))
+                                        for value in self.feature_roi_pending)
                             self.feature_roi_pending = None
-                            initialized = self.feature_tracker.init(feature_frame, roi)
+                            try:
+                                initialized = self.feature_tracker.init(feature_frame, roi)
+                            except (cv2.error, TypeError, ValueError) as error:
+                                initialized = False
+                                self.feature_error = (
+                                    f'Feature tracker rejected the selected box: {error}')
                             if initialized is False:
-                                raise RuntimeError('OpenCV could not initialize that feature ROI')
-                            self.feature_selected_id = 1
-                            self.feature_reference_patch = self._extract_feature_patch(gray, roi)
-                            self._reset_feature_guard(clear_reference=False)
-                            self.feature_last_confirmed = (
-                                roi[0] + roi[2] / 2, roi[1] + roi[3] / 2,
-                                time.monotonic())
-                            objects = [self._feature_detection(roi)]
+                                self.feature_tracker = None
+                                self.feature_reacquiring = True
+                                objects = []
+                            else:
+                                self.feature_error = None
+                                self.feature_selected_id = 1
+                                self.feature_reference_patch = self._extract_feature_patch(gray, roi)
+                                self._reset_feature_guard(clear_reference=False)
+                                self.feature_last_confirmed = (
+                                    roi[0] + roi[2] / 2, roi[1] + roi[3] / 2,
+                                    time.monotonic())
+                                objects = [self._feature_detection(roi)]
                         elif self.feature_tracker:
                             found, bbox = self.feature_tracker.update(feature_frame)
                             if found and self.feature_lock_size and self.feature_initial_size:
@@ -2130,6 +3300,7 @@ class VisionDashboardEngine:
                             similarity = self._feature_similarity(gray, bbox) if found else None
                             if (found and self._feature_candidate_is_credible(
                                     bbox, similarity)):
+                                self.feature_error = None
                                 self.feature_invalid_frames = 0
                                 self.feature_reacquiring = False
                                 objects = [self._feature_detection(bbox, similarity)]
@@ -2150,6 +3321,14 @@ class VisionDashboardEngine:
                         else:
                             objects = []
                         selected_id = self.feature_selected_id
+                    if self.ui_mode == 'hybrid':
+                        hybrid = self._hybrid_target(gray, frame_index)
+                        objects = [hybrid]
+                        selected_id = 1
+                    elif self.ui_mode == 'transfer':
+                        transfer = self._transfer_target(gray)
+                        objects = [transfer]
+                        selected_id = 1
                     selected = next((item for item in objects
                                      if item['track_id'] == selected_id), None)
                     selected = self._filter_selected(selected)
@@ -2194,6 +3373,7 @@ class VisionDashboardEngine:
                     'feature_reacquiring': self.feature_reacquiring,
                     'feature_invalid_frames': self.feature_invalid_frames,
                     'feature_similarity_baseline': self.feature_similarity_baseline,
+                    'tracking_error': self.feature_error,
                     'ui_mode': self.ui_mode,
                     'aim_mode': self.aim_mode,
                     'aim_point': {'x': self.aim_point[0], 'y': self.aim_point[1]},
@@ -2202,12 +3382,17 @@ class VisionDashboardEngine:
                         'vertical': ('reversed' if self.image_vertical_reversed else 'normal')},
                     'orientation_sanity': dict(self.orientation_sanity),
                     'orientation_calibration': dict(self.orientation_calibration),
+                    'transfer_function_test': (dict(self.transfer_state)
+                                               if self.ui_mode == 'transfer' else None),
                     'camera_device': self.device,
                     'camera_settings': {'width': self.width, 'height': self.height,
                                         'fps': self.requested_fps},
                     'camera_auto': {
                         'available': self.source == 'picamera2',
                         'enabled': self.camera_auto_exposure,
+                        'gain_locked': self.camera_gain_locked,
+                        'agc_locked': (not self.camera_auto_exposure and
+                                       not self.camera_gain_locked),
                         'exposure_value': self.camera_exposure_value,
                         'manual_exposure_time_us': self.camera_manual_exposure_us,
                         'manual_analogue_gain': self.camera_manual_gain,
@@ -2245,15 +3430,11 @@ class VisionDashboardEngine:
                     self.stop_event.wait(max(0, 1 / self.requested_fps -
                                              (time.monotonic() - cycle)))
         except Exception as error:
-            if self.hil_controller and self.hil_enabled:
-                try:
-                    self.hil_controller.freeze()
-                except Exception:
-                    pass
             with self.frame_ready:
                 self.telemetry = dict(
                     self.telemetry, state='CAMERA OFFLINE',
-                    error=(f'Camera unavailable: {error}. Motor link remains available; '
+                    objects=[], error_x_px=None, error_y_px=None,
+                    error=(f'Camera unavailable: {error}. Motor link remains armed; '
                            'use Recover Camera to retry capture.'))
                 self.frame_ready.notify_all()
         finally:
@@ -2263,15 +3444,82 @@ class VisionDashboardEngine:
     def snapshot(self):
         with self.lock:
             snapshot = dict(self.telemetry)
+            # These are operator-controlled state, not frame-derived values.
+            # Keep them current even when the last camera frame is stale.
+            snapshot.update(
+                ui_mode=self.ui_mode,
+                tracking_mode=self.tracking_mode,
+                camera_device=self.device,
+                cameras=self.cameras,
+                camera_inventory_status=self.camera_inventory_status,
+                image_curve={'black': self.curve_black,
+                             'white': self.curve_white,
+                             'gamma': self.curve_gamma},
+                image_orientation={
+                    'horizontal': ('reversed' if self.image_horizontal_reversed
+                                   else 'normal'),
+                    'vertical': ('reversed' if self.image_vertical_reversed
+                                 else 'normal')},
+                camera_auto={
+                    'available': self.source == 'picamera2' or
+                                 str(self.device).startswith('picamera2:'),
+                    'enabled': self.camera_auto_exposure,
+                    'gain_locked': self.camera_gain_locked,
+                    'agc_locked': (not self.camera_auto_exposure and
+                                   not self.camera_gain_locked),
+                    'exposure_value': self.camera_exposure_value,
+                    'manual_exposure_time_us': self.camera_manual_exposure_us,
+                    'manual_analogue_gain': self.camera_manual_gain,
+                    'exposure_time_us': self.camera_metadata.get('ExposureTime'),
+                    'analogue_gain': self.camera_metadata.get('AnalogueGain'),
+                    'digital_gain': self.camera_metadata.get('DigitalGain'),
+                    'limits': {
+                        name: dict(self.camera_control_ranges[name])
+                        for name in ('ExposureValue', 'ExposureTime', 'AnalogueGain')
+                        if name in self.camera_control_ranges},
+                })
+            snapshot['camera_recovery'] = {
+                'in_progress': self.camera_recovery_in_progress,
+                'attempts': self.camera_recovery_count,
+                'status': self.camera_recovery_status,
+                'result': self.camera_recovery_result,
+            }
             # A camera exception can occur before the first frame.  Build the
             # non-camera status dynamically so Live Mode, bridge diagnostics,
             # motor feedback and recovery controls remain usable.
-            if self.hil_controller and 'hardware_loop' not in snapshot:
+            if (self.hil_controller or self.hil_host or self.hil_route_target) and 'hardware_loop' not in snapshot:
                 snapshot.update(
                     width=self.width, height=self.height, ui_mode=self.ui_mode,
                     tracking_mode=self.tracking_mode, selected_track_id=None,
                     camera_device=self.device, cameras=self.cameras,
                     hardware_loop=self._hil_update(None, self.width, self.height))
+            # Camera telemetry is frame-based and can legitimately stop
+            # advancing during CSI recovery. Never let that frozen frame make
+            # the live motor controller appear OFF, connected, or fresh when
+            # its current state says otherwise.
+            if self.hil_controller:
+                live = self.hil_controller.status()
+                hardware = dict(snapshot.get('hardware_loop') or {})
+                hardware.update(
+                    enabled=self.hil_enabled,
+                    connection=live.get('connection'),
+                    feedback_live=live.get('feedback_live'),
+                    motion=live.get('motion'),
+                    armed=live.get('armed'),
+                    encoder_positions=live.get('positions', {}),
+                    cycle_count=live.get('cycle_count'),
+                    cycle_overruns=live.get('cycle_overruns'),
+                    feedback_poll_rate_hz=live.get(
+                        'configured_feedback_poll_rate_hz'),
+                    encoder_poll_count=live.get('encoder_poll_count'),
+                    runtime_rx_count=live.get('runtime_rx_count'),
+                    target_confirmation=live.get('target_confirmation'),
+                    last_achieved_cycle_rate_hz=live.get(
+                        'last_achieved_cycle_rate_hz'),
+                    error=self.hil_error or live.get('last_error'))
+                snapshot['hardware_loop'] = hardware
+                snapshot['motor_output'] = ('ENABLED' if self.hil_enabled
+                                            else 'DISABLED')
             return snapshot
 
     def mjpeg(self):
@@ -2313,8 +3561,14 @@ class VisionDashboardEngine:
                     self.request_hil_enable()
                 else:
                     self.set_hil_enabled(False)
+            elif action == 'manual_jog':
+                self.manual_jog(message['axis'], message['direction'], message['rate'])
+            elif action == 'manual_stop':
+                self.manual_stop()
             elif action == 'set_hil_dispatch_rate':
                 self.set_hil_dispatch_rate(message['value'])
+            elif action == 'set_hil_feedback_timeout':
+                self.set_hil_feedback_timeout(message['value'])
             elif action == 'set_hil_display_span':
                 self.set_hil_display_span(message['value'])
             elif action == 'set_hil_travel_envelope':
@@ -2340,12 +3594,29 @@ class VisionDashboardEngine:
                                        message.get('box_fraction', .12))
             elif action == 'set_operating_mode':
                 self.set_operating_mode(message['mode'])
+            elif action == 'set_transfer_function':
+                self.set_transfer_function(
+                    message['azimuth_x'], message['azimuth_y'],
+                    message['elevation_x'], message['elevation_y'])
             elif action == 'set_aim_mode':
                 self.set_aim_mode(message['mode'])
+            elif action == 'center_selected':
+                if not self.last_selected:
+                    raise ValueError('The selected feature is not locked yet; retry after the green box appears')
+                self.set_aim_mode('center')
+                self.request_hil_enable()
+            elif action == 'manual_lock_hold':
+                self.set_manual_lock_hold(
+                    message.get('active', False), message.get('x'),
+                    message.get('y'), message.get('box_fraction', .12))
+            elif action == 'zero_encoder_marker':
+                self.zero_encoder_marker()
             elif action == 'set_image_orientation':
                 self.set_image_orientation(message['horizontal'], message['vertical'])
             elif action == 'start_orientation_learning':
                 self.request_orientation_learning(message.get('step'), message.get('rate'))
+            elif action == 'abort_orientation_learning':
+                self.abort_orientation_learning()
             elif action == 'clear_orientation_profile':
                 self.clear_orientation_profile()
             elif action == 'refresh_cameras':
@@ -2360,6 +3631,10 @@ class VisionDashboardEngine:
                     message.get('automatic', True), message.get('exposure_value', 0),
                     message.get('exposure_time_us', 10000),
                     message.get('analogue_gain', 1))
+            elif action == 'set_camera_agc_lock':
+                self.set_camera_agc_lock(message.get('locked', True))
+            elif action == 'set_camera_gain_lock':
+                self.set_camera_gain_lock(message.get('locked', True))
             elif action == 'set_image_curve':
                 self.set_image_curve(message['black'], message['white'],
                                      message['gamma'])
@@ -2373,9 +3648,16 @@ class VisionDashboardEngine:
                 self.reset_live_view()
             elif action == 'set_hil_control_strategy':
                 self.set_hil_control_strategy(message['preset'],
-                                              message.get('horizon', .25),
-                                              message.get('proportional', .2),
-                                              message.get('deadband', .03))
+                                              message.get('horizon', .05),
+                                              message.get('proportional', .55),
+                                              message.get('derivative', .10),
+                                              message.get('deadband', .02))
+            elif action == 'set_hil_max_tracking_slew':
+                self.set_hil_max_tracking_slew(message['value'])
+            elif action == 'set_initial_trajectory_learning':
+                self.set_initial_trajectory_learning(
+                    message.get('enabled', False),
+                    message.get('window_seconds', 2.0))
             else:
                 raise ValueError('Unknown dashboard action')
         return self.snapshot()
@@ -2383,7 +3665,7 @@ class VisionDashboardEngine:
 
 def create_app(engine, static_directory=None):
     try:
-        from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+        from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
         from fastapi.responses import FileResponse, StreamingResponse
     except ImportError as error:
         raise RuntimeError('Install the vision-dashboard optional dependencies') from error
@@ -2417,16 +3699,34 @@ def create_app(engine, static_directory=None):
         return {'camera_device': engine.device,
                 'controls': dict(engine.camera_control_ranges)}
 
+    @app.post('/api/command')
+    async def command_api(message: dict):
+        """Reliable request/response command path for local automation.
+
+        The browser keeps using the bidirectional WebSocket. Test runners and
+        companion processes use this endpoint so a command cannot be lost when
+        a short-lived WebSocket closes before its receive task consumes JSON.
+        """
+        try:
+            engine.command(message)
+        except (KeyError, RuntimeError, TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {'accepted_action': message.get('action'),
+                'status': engine.snapshot()}
+
     @app.websocket('/ws')
     async def websocket(websocket: WebSocket):
         await websocket.accept()
         last_frame = -2
+        last_send = 0.0
         try:
             while True:
                 snapshot = engine.snapshot()
-                if snapshot.get('frame') != last_frame:
+                now = time.monotonic()
+                if snapshot.get('frame') != last_frame or now - last_send >= .5:
                     await websocket.send_json(snapshot)
                     last_frame = snapshot.get('frame')
+                    last_send = now
                 try:
                     message = await asyncio.wait_for(websocket.receive_json(), timeout=.05)
                     try:
@@ -2460,9 +3760,13 @@ def parse_args():
     parser.add_argument('--allow-lan', action='store_true')
     parser.add_argument('--log-directory', default='vision-dashboard-logs')
     parser.add_argument('--hil-host', help='Enable guarded synthetic hardware-loop mode through this bridge host')
+    parser.add_argument('--hil-route-target',
+                        help=('Telescope address used to re-resolve this computer\'s current '
+                              'Bridge address after DHCP/network changes'))
     parser.add_argument('--hil-port', type=int, default=2000)
     parser.add_argument('--hil-envelope-degrees', type=float, default=0)
     parser.add_argument('--hil-dispatch-rate-hz', type=float, default=4)
+    parser.add_argument('--hil-feedback-timeout-seconds', type=float, default=10)
     parser.add_argument('--hil-display-span-degrees', type=float, default=5)
     return parser.parse_args()
 
@@ -2487,13 +3791,17 @@ def main():
         raise SystemExit('Hardware-loop envelope must be 0 (disabled)–90 degrees')
     if not 1 <= args.hil_dispatch_rate_hz <= 20:
         raise SystemExit('Hardware-loop dispatch rate must be 1–20 Hz')
+    if not 3 <= args.hil_feedback_timeout_seconds <= 60:
+        raise SystemExit('Hardware-loop feedback timeout must be 3–60 seconds')
     engine = VisionDashboardEngine(
         source=args.source, device=args.device, width=args.width, height=args.height,
         fps=args.fps, threshold=args.threshold, jpeg_quality=args.jpeg_quality,
         log_directory=args.log_directory, polarity=args.polarity,
         hil_host=args.hil_host, hil_port=args.hil_port,
+        hil_route_target=args.hil_route_target,
         hil_envelope_degrees=args.hil_envelope_degrees,
         hil_dispatch_rate_hz=args.hil_dispatch_rate_hz,
+        hil_feedback_timeout_seconds=args.hil_feedback_timeout_seconds,
         hil_display_span_degrees=args.hil_display_span_degrees,
         ui_mode=('live' if args.mode == 'live-run'
                  or args.source in ('v4l2', 'picamera2', 'file') else 'demo'))

@@ -1,5 +1,6 @@
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 try:
@@ -7,9 +8,11 @@ try:
     import numpy as np
     from tools.vision_dashboard import (BrightObjectTracker, VisionDashboardEngine,
                                         create_feature_tracker,
+                                        estimate_backlash_breakpoint,
                                         hil_marker_from_status, hil_target_from_pixel,
                                         learn_pixel_mount_transform,
-                                        learned_mount_delta, normalize_camera_controls,
+                                        learned_mount_delta, transfer_mount_delta,
+                                        normalize_camera_controls,
                                         wrapped_encoder_delta)
     VISION_DEPS_AVAILABLE = True
 except ImportError:
@@ -29,6 +32,27 @@ class VisionDashboardTests(unittest.TestCase):
 
     def tearDown(self):
         self.camera_inventory.stop()
+
+    def test_dashboard_avoids_internal_engineering_jargon(self):
+        dashboard = (Path(__file__).parent / 'tools' /
+                     'vision_dashboard_static' / 'index.html').read_text(
+                         encoding='utf-8').lower()
+        for phrase in ('artificial optical plant', 'optical plant',
+                       'hardware-loop test', 'outer-loop', 'plant offset'):
+            self.assertNotIn(phrase, dashboard)
+        self.assertIn("exposurevalue').oninput", dashboard)
+        self.assertIn("e.target.dataset.pending='1'", dashboard)
+        self.assertIn("['manualexposure','manualgain'].foreach", dashboard)
+        self.assertIn('manual exposure to apply', dashboard)
+        self.assertIn('editable settings, not readouts', dashboard)
+        self.assertIn('mirror left / right', dashboard)
+        self.assertIn('flip top / bottom', dashboard)
+        self.assertIn('maximum tracking slew rate', dashboard)
+        self.assertIn('rate 1 — approximately 0.0023°/s', dashboard)
+        self.assertIn('rate 9 — approximately 2.91°/s', dashboard)
+        self.assertIn('zero encoder marker at center', dashboard)
+        self.assertIn('manual — center here', dashboard)
+        self.assertIn("rate:number(document.getelementbyid('manualjogspeed').value)", dashboard)
 
     @staticmethod
     def frame(points):
@@ -100,11 +124,52 @@ class VisionDashboardTests(unittest.TestCase):
         coarse = learn_pixel_mount_transform((40, 5), (-3, 35), (.5, .48))
         self.assertEqual(coarse['measured_step_degrees'], [.5, .48])
 
+    def test_transfer_mount_delta_inverts_known_artificial_plant(self):
+        coefficients = {
+            'azimuth_x_px_per_degree': 180,
+            'azimuth_y_px_per_degree': 25,
+            'elevation_x_px_per_degree': -18,
+            'elevation_y_px_per_degree': -150,
+        }
+        azimuth, elevation = transfer_mount_delta(81, -62.5, coefficients)
+        self.assertAlmostEqual(azimuth, .5)
+        self.assertAlmostEqual(elevation, .5)
+        with self.assertRaisesRegex(ValueError, 'singular'):
+            transfer_mount_delta(1, 1, {
+                'azimuth_x_px_per_degree': 1,
+                'azimuth_y_px_per_degree': 2,
+                'elevation_x_px_per_degree': 2,
+                'elevation_y_px_per_degree': 4,
+            })
+
     def test_learned_camera_transform_rejects_weak_or_parallel_probes(self):
         with self.assertRaises(ValueError):
             learn_pixel_mount_transform((1, 0), (0, 8), .01)
         with self.assertRaises(ValueError):
             learn_pixel_mount_transform((10, 0), (20, 0), .01)
+
+    def test_backlash_breakpoint_uses_repeatable_flat_then_linear_trials(self):
+        trials = []
+        for offset in (-.002, .0, .003):
+            samples = []
+            for index in range(11):
+                encoder = index * .02
+                noise = (.15, -.10, .05)[index % 3]
+                pixels = max(0, (encoder - (.06 + offset)) * 120) + noise
+                samples.append((encoder, max(0, pixels)))
+            trials.append(samples)
+        result = estimate_backlash_breakpoint(trials)
+        self.assertEqual(result['accepted_trials'], 3)
+        self.assertAlmostEqual(result['degrees'], .06, delta=.025)
+        self.assertLess(result['spread_degrees'], .015)
+
+    def test_backlash_breakpoint_rejects_hunting_jump_trial(self):
+        good = [(index * .02, max(0, (index * .02 - .06) * 120))
+                for index in range(11)]
+        jumped = [(index * .02, value) for index, value in enumerate(
+            (0, .1, .2, 18, 2, 17, 3, 19, 4, 20, 5))]
+        with self.assertRaisesRegex(ValueError, '3 consistent'):
+            estimate_backlash_breakpoint([good, good, jumped])
 
     def test_selected_blinking_track_keeps_identity_by_predicted_motion(self):
         tracker = BrightObjectTracker(threshold=100, match_distance=35, max_missed=10)
@@ -126,6 +191,101 @@ class VisionDashboardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             engine.set_synthetic_blink(True, 1, 2, 1, 4)
 
+    def test_initial_snapshot_is_safe_before_first_camera_frame(self):
+        engine = VisionDashboardEngine(
+            source='picamera2', device='picamera2:0', ui_mode='live')
+        snapshot = engine.snapshot()
+        self.assertEqual(snapshot['frame'], -1)
+        self.assertEqual(snapshot['state'], 'STARTING')
+        self.assertEqual(snapshot['objects'], [])
+        self.assertIsNone(snapshot['selected_track_id'])
+        self.assertFalse(snapshot['recording'])
+
+        dashboard = (Path(__file__).parent / 'tools' /
+                     'vision_dashboard_static' / 'index.html').read_text(
+                         encoding='utf-8')
+        self.assertIn('Array.isArray(data.objects)?data.objects:[]', dashboard)
+        self.assertIn('<img id="video" alt="Live tracking camera">', dashboard)
+        self.assertIn("window.addEventListener('load'", dashboard)
+        self.assertIn('CAMERA UNAVAILABLE — RESUME DISABLED', dashboard)
+
+    def test_hybrid_mode_keeps_camera_and_supplies_known_target(self):
+        engine = VisionDashboardEngine(
+            source='picamera2', device='picamera2:0', ui_mode='live',
+            width=640, height=480)
+        engine.set_operating_mode('hybrid')
+        self.assertEqual(engine.ui_mode, 'hybrid')
+        self.assertEqual(engine.desired_source, 'picamera2')
+        frame = np.zeros((480, 640), dtype=np.uint8)
+        target = engine._hybrid_target(frame, 10)
+        self.assertTrue(target['synthetic'])
+        self.assertEqual(target['track_id'], 1)
+        self.assertGreater(frame.max(), 0)
+
+    def test_transfer_function_uses_real_encoder_delta_to_move_dot(self):
+        engine = VisionDashboardEngine(
+            source='synthetic', ui_mode='transfer', width=640, height=480,
+            hil_host='127.0.0.1')
+        engine.hil_controller = MagicMock()
+        engine._transfer_path = MagicMock(return_value=(0.0, 0.0))
+        origin = {
+            'connection': 'live', 'positions': {
+                'Azimuth': {'raw_degrees': 100.0},
+                'Elevation': {'raw_degrees': 30.0}}}
+        moved = {
+            'connection': 'live', 'positions': {
+                'Azimuth': {'raw_degrees': 101.0},
+                'Elevation': {'raw_degrees': 32.0}}}
+        engine.hil_controller.status.side_effect = [origin, moved]
+        first = engine._transfer_target(np.zeros((480, 640), dtype=np.uint8))
+        second = engine._transfer_target(np.zeros((480, 640), dtype=np.uint8))
+        expected_x = 320 - (180 * 1 + -18 * 2)
+        expected_y = 240 - (25 * 1 + -150 * 2)
+        self.assertAlmostEqual(first['x'], 320)
+        self.assertAlmostEqual(first['y'], 240)
+        self.assertAlmostEqual(second['x'], expected_x)
+        self.assertAlmostEqual(second['y'], expected_y)
+        self.assertEqual(engine.transfer_state['encoder_delta_degrees'], [1.0, 2.0])
+
+    def test_transfer_function_rejects_singular_matrix(self):
+        engine = VisionDashboardEngine(source='synthetic', ui_mode='transfer')
+        with self.assertRaisesRegex(ValueError, 'singular'):
+            engine.set_transfer_function(100, 50, 200, 100)
+        engine.set_transfer_function(180, 25, -18, -150)
+        self.assertEqual(engine.transfer_function['elevation_y_px_per_degree'], -150)
+
+    def test_transfer_mode_has_separate_mapping_profile_key(self):
+        engine = VisionDashboardEngine(source='synthetic', ui_mode='live')
+        camera_key = engine._orientation_profile_key()
+        engine.ui_mode = 'transfer'
+        transfer_key = engine._orientation_profile_key()
+        self.assertNotEqual(camera_key, transfer_key)
+        self.assertTrue(transfer_key.startswith('transfer-function-test|'))
+
+    def test_transfer_mode_keeps_physical_camera_capture_active(self):
+        engine = VisionDashboardEngine(
+            source='picamera2', device='picamera2:0', ui_mode='live')
+        engine.set_operating_mode('transfer')
+        self.assertEqual(engine.ui_mode, 'transfer')
+        self.assertEqual(engine.desired_source, 'picamera2')
+
+    def test_transfer_path_pans_once_over_thirty_minutes(self):
+        engine = VisionDashboardEngine(
+            source='synthetic', ui_mode='transfer', width=640, height=480)
+        with patch('tools.vision_dashboard.time.monotonic', return_value=1000):
+            engine.transfer_path_started = 1000
+            start = engine._transfer_path()
+        with patch('tools.vision_dashboard.time.monotonic', return_value=1900):
+            middle = engine._transfer_path()
+        with patch('tools.vision_dashboard.time.monotonic', return_value=2800):
+            end = engine._transfer_path()
+        self.assertAlmostEqual(start[0], -102.4)
+        self.assertAlmostEqual(middle[0], 0.0)
+        self.assertAlmostEqual(end[0], 102.4)
+        self.assertAlmostEqual(start[1], 0.0)
+        self.assertAlmostEqual(middle[1], 38.4)
+        self.assertAlmostEqual(end[1], 0.0, places=5)
+
     def test_camera_controls_are_normalized_and_enforced(self):
         controls = normalize_camera_controls({
             'ExposureValue': (-8.0, 8.0, 0.0),
@@ -144,23 +304,153 @@ class VisionDashboardTests(unittest.TestCase):
             engine.set_camera_exposure(False, 0, 10000, 16.1)
 
     def test_bridge_service_restart_reconnects_motor_link(self):
-        engine = VisionDashboardEngine(source='synthetic', hil_host='127.0.0.1')
+        engine = VisionDashboardEngine(
+            source='synthetic', hil_host='127.0.0.1',
+            hil_route_target='192.168.1.231', bridge_recovery_quiet_seconds=0)
         engine.hil_controller = MagicMock()
-        engine.hil_controller.status.return_value = {'connection': 'live'}
+        engine.hil_controller.thread = None
+        recovered = MagicMock()
+        recovered.status.return_value = {'connection': 'live'}
         completed = MagicMock(returncode=0, stdout='', stderr='')
         with (patch('tools.vision_dashboard.subprocess.run', return_value=completed) as run,
               patch.object(engine, '_poll_bridge_management',
                            return_value={'verified_proxy': True}),
-              patch.object(engine, 'reconnect_bridge_client') as reconnect):
+              patch.object(engine, '_refresh_bridge_host', return_value=False),
+              patch.object(engine, '_new_position_controller', return_value=recovered)):
             engine.restart_bridge_service()
             engine.bridge_service_restart_thread.join(2)
         self.assertFalse(engine.bridge_service_restart_in_progress)
         self.assertEqual(engine.bridge_service_restart_count, 1)
         self.assertIn('recovered successfully', engine.bridge_service_restart_result)
-        reconnect.assert_called_once_with()
-        run.assert_called_once()
-        self.assertEqual(run.call_args.args[0], [
-            '/usr/bin/systemctl', '--user', 'restart', 'celestron-bridge.service'])
+        self.assertEqual(engine.hil_controller, recovered)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0], [
+            '/usr/bin/systemctl', '--user', 'stop', 'celestron-bridge.service'])
+        self.assertEqual(run.call_args_list[1].args[0], [
+            '/usr/bin/systemctl', '--user', 'start', 'celestron-bridge.service'])
+
+    def test_bridge_host_refresh_uses_current_route_source(self):
+        engine = VisionDashboardEngine(
+            source='synthetic', hil_host='192.168.1.163',
+            hil_route_target='192.168.1.231')
+        with patch('tools.vision_dashboard.route_source_address',
+                   return_value='192.168.1.149'):
+            self.assertTrue(engine._refresh_bridge_host())
+        self.assertEqual(engine.hil_host, '192.168.1.149')
+
+    def test_failed_client_still_exposes_bridge_recovery(self):
+        engine = VisionDashboardEngine(
+            source='synthetic', hil_host='192.168.1.149',
+            hil_route_target='192.168.1.231')
+        engine.hil_controller = None
+        engine.hil_error = 'previous recovery failed'
+        status = engine._hil_update(None, 640, 480)
+        self.assertTrue(status['available'])
+        self.assertEqual(status['connection'], 'disconnected')
+        self.assertIn('Recover Bridge', status['description'])
+
+    def test_manual_jog_does_not_require_target_mapping_reference_or_arm(self):
+        engine = VisionDashboardEngine(source='synthetic', hil_host='127.0.0.1')
+        engine.hil_controller = MagicMock()
+        engine.hil_controller.status.return_value = {'connection': 'live'}
+        engine.manual_jog('azimuth', 1, 3)
+        engine.hil_controller.manual_jog.assert_called_once_with(0x10, 1, 3, 2.0)
+        engine.manual_stop()
+        engine.hil_controller.manual_stop.assert_called_once_with()
+
+    def test_zero_encoder_marker_rebases_relative_reference_without_disarming(self):
+        engine = VisionDashboardEngine(source='synthetic', hil_host='127.0.0.1')
+        engine.hil_controller = MagicMock()
+        engine.hil_controller.status.side_effect = [
+            {'connection': 'live', 'motion': 'target_sent'},
+            {'connection': 'live', 'motion': 'paused'}]
+        engine.hil_enabled = True
+        engine.hil_current_target = {'azimuth_degrees': 181, 'elevation_degrees': 1}
+        engine.hil_target_rate = {'azimuth_deg_s': .1, 'elevation_deg_s': .1}
+        engine.zero_encoder_marker()
+        engine.hil_controller.freeze.assert_called_once_with()
+        engine.hil_controller.reference.assert_called_once_with(180, 0)
+        self.assertTrue(engine.hil_enabled)
+        self.assertIsNone(engine.hil_current_target)
+        self.assertIsNone(engine.hil_target_rate)
+        self.assertEqual(engine.hil_last_locked_marker['azimuth_degrees'], 180.0)
+        self.assertFalse(engine.hil_reference_rebasing)
+
+    def test_feedback_interruption_retains_tracking_request(self):
+        engine = VisionDashboardEngine(source='synthetic', hil_host='127.0.0.1')
+        engine.hil_controller = MagicMock()
+        engine.hil_controller.status.return_value = {
+            'connection': 'recovering', 'motion': 'idle', 'positions': {},
+            'reconnections': 1, 'armed': False}
+        engine.hil_enabled = True
+        status = engine._hil_update(None, 640, 480)
+        self.assertTrue(engine.hil_enabled)
+        self.assertTrue(status['enabled'])
+        self.assertIn('Tracking remains ON', status['error'])
+        engine.hil_controller.freeze.assert_called_once_with()
+
+    def test_snapshot_overlays_live_motor_state_on_stale_camera_frame(self):
+        engine = VisionDashboardEngine(source='synthetic', hil_host='127.0.0.1')
+        engine.hil_controller = MagicMock()
+        engine.hil_controller.status.return_value = {
+            'connection': 'live', 'feedback_live': True,
+            'motion': 'target_sent', 'armed': True,
+            'positions': {'Azimuth': {'live': True},
+                          'Elevation': {'live': True}},
+            'cycle_count': 12, 'cycle_overruns': 0,
+            'last_achieved_cycle_rate_hz': 4.0, 'last_error': None}
+        engine.hil_enabled = True
+        engine.telemetry = {
+            'frame': 10, 'state': 'CAMERA RECOVERY',
+            'motor_output': 'DISABLED',
+            'hardware_loop': {'enabled': False, 'motion': 'paused'}}
+        snapshot = engine.snapshot()
+        self.assertEqual(snapshot['motor_output'], 'ENABLED')
+        self.assertTrue(snapshot['hardware_loop']['enabled'])
+        self.assertTrue(snapshot['hardware_loop']['feedback_live'])
+        self.assertEqual(snapshot['hardware_loop']['motion'], 'target_sent')
+
+    def test_warm_link_with_stale_encoders_warns_without_gating(self):
+        engine = VisionDashboardEngine(source='synthetic', hil_host='127.0.0.1')
+        engine.hil_controller = MagicMock()
+        engine.hil_controller.status.return_value = {
+            'connection': 'live', 'feedback_live': False, 'motion': 'paused',
+            'positions': {
+                'Azimuth': {'reference_degrees': 180.0},
+                'Elevation': {'reference_degrees': 0.0}},
+            'reconnections': 0, 'armed': True,
+            'local_reference_set': True}
+        engine.hil_controller.freeze.return_value = False
+        engine.hil_enabled = True
+        engine.orientation_calibration = {
+            'valid': True,
+            'inverse_degrees_per_pixel': [[.001, 0], [0, .001]]}
+        status = engine._hil_update({'x': 330, 'y': 240}, 640, 480)
+        self.assertTrue(status['enabled'])
+        self.assertFalse(status['feedback_live'])
+        self.assertIn('does not gate target dispatch', status['error'])
+        engine.hil_controller.freeze.assert_not_called()
+
+    def test_reconnect_restores_last_optical_reference(self):
+        engine = VisionDashboardEngine(source='synthetic', hil_host='127.0.0.1')
+        engine.hil_controller = MagicMock()
+        positions = {
+            'Azimuth': {'reference_degrees': None},
+            'Elevation': {'reference_degrees': None}}
+        restored = {
+            'connection': 'live', 'motion': 'paused', 'positions': positions,
+            'reconnections': 1, 'armed': True, 'local_reference_set': False}
+        live_positions = {
+            'Azimuth': {'reference_degrees': 181.25},
+            'Elevation': {'reference_degrees': 42.5}}
+        live = dict(restored, positions=live_positions, local_reference_set=True)
+        engine.hil_controller.status.side_effect = [restored, live]
+        engine.hil_enabled = True
+        engine.hil_last_locked_marker = {
+            'azimuth_degrees': 181.25, 'elevation_degrees': 42.5}
+        engine._hil_update(None, 640, 480)
+        engine.hil_controller.reference.assert_called_once_with(181.25, 42.5)
+        self.assertTrue(engine.hil_enabled)
 
     def test_feature_roi_mode_and_bounds(self):
         try:
@@ -243,6 +533,13 @@ class VisionDashboardTests(unittest.TestCase):
         self.assertEqual(engine.feature_roi_pending, (122, 331, 77, 58))
         engine.set_image_orientation('reversed', 'normal')
         self.assertTrue(engine.image_horizontal_reversed)
+        source = np.array([[1, 2], [3, 4]], dtype=np.uint8)
+        np.testing.assert_array_equal(
+            engine._apply_image_orientation(source), np.array([[2, 1], [4, 3]]))
+        engine.set_hil_max_tracking_slew(3)
+        self.assertEqual(engine.hil_max_tracking_slew_deg_s, 3)
+        with self.assertRaisesRegex(ValueError, '0.001–5'):
+            engine.set_hil_max_tracking_slew(6)
         engine.reset_live_view()
         self.assertIsNone(engine.feature_selected_id)
         self.assertEqual(engine.aim_mode, 'center')
@@ -273,6 +570,60 @@ class VisionDashboardTests(unittest.TestCase):
         finally:
             engine.stop()
 
+    def test_live_target_can_be_reselected_while_motor_output_remains_armed(self):
+        engine = VisionDashboardEngine(source='synthetic', ui_mode='live',
+                                       width=640, height=480)
+        engine.telemetry.update(width=640, height=480)
+        engine.hil_enabled = True
+        engine.feature_selected_id = 1
+        engine.hil_previous_target = (180.0, 10.0)
+        engine.set_aim_mode('center')
+        engine.set_feature_point(.60, .40, .12)
+        self.assertTrue(engine.hil_enabled)
+        self.assertIsNone(engine.feature_selected_id)
+        self.assertEqual(engine.feature_roi_pending, (346, 163, 77, 58))
+        self.assertIsNone(engine.hil_previous_target)
+        self.assertIn('initializing feature lock', engine.hil_error)
+
+    def test_manual_lock_hold_freezes_then_reseeds_without_disarming(self):
+        engine = VisionDashboardEngine(source='synthetic', ui_mode='live',
+                                       width=640, height=480)
+        engine.telemetry.update(width=640, height=480)
+        engine.hil_enabled = True
+        engine.hil_controller = MagicMock()
+        engine.set_manual_lock_hold(True, .25, .75, .12)
+        self.assertTrue(engine.hil_enabled)
+        engine.hil_controller.freeze.assert_called()
+        self.assertTrue(engine.manual_lock_hold['active'])
+        engine.set_manual_lock_hold(False, .30, .70, .12)
+        self.assertTrue(engine.hil_enabled)
+        self.assertFalse(engine.manual_lock_hold['active'])
+        self.assertTrue(engine.manual_lock_hold['release_pending'])
+        time.sleep(1.1)
+        self.assertIsNone(engine.manual_lock_hold)
+        self.assertEqual(engine.feature_roi_pending, (154, 307, 77, 58))
+        self.assertEqual(engine.aim_mode, 'center')
+
+    def test_initial_slow_trajectory_regresses_pixel_drift_to_mount_rate(self):
+        engine = VisionDashboardEngine(source='synthetic', ui_mode='live')
+        engine.orientation_calibration = {
+            'valid': True,
+            'inverse_degrees_per_pixel': [[.01, 0], [0, .01]]}
+        engine.hil_initial_trajectory_enabled = True
+        engine.hil_initial_trajectory_window = 2.0
+        for index in range(21):
+            timestamp = 100 + index * .1
+            engine.feature_samples.append(
+                (timestamp, 200 + 2 * (timestamp - 100),
+                 150 - 1 * (timestamp - 100)))
+        engine._update_initial_trajectory({'x': 204, 'y': 148}, 102.0)
+        trajectory = engine.hil_initial_trajectory
+        self.assertTrue(trajectory['valid'])
+        self.assertAlmostEqual(
+            trajectory['mount_rate']['azimuth_deg_s'], -.02, places=3)
+        self.assertAlmostEqual(
+            trajectory['mount_rate']['elevation_deg_s'], .01, places=3)
+
     def test_outer_loop_presets_and_envelope_clamp(self):
         engine = VisionDashboardEngine(source='synthetic', hil_envelope_degrees=5)
         engine.set_hil_control_strategy('balanced')
@@ -283,11 +634,68 @@ class VisionDashboardTests(unittest.TestCase):
         self.assertLessEqual(abs(command[1]), 4.75)
         with self.assertRaises(ValueError):
             engine.set_hil_control_strategy('custom', 2, .2)
-        engine.set_hil_control_strategy('custom', 0, 0, .1)
+        engine.set_hil_control_strategy('custom', 0, 0, 0, .1)
         held = engine._apply_outer_loop((180.05, .05), {
             'azimuth_degrees': 180, 'elevation_degrees': 0})
         self.assertAlmostEqual(held[0], 180)
         self.assertAlmostEqual(held[1], 0)
+
+    def test_balanced_pd_response_reduces_correction_and_brakes_closing_error(self):
+        engine = VisionDashboardEngine(source='synthetic')
+        engine.set_hil_control_strategy('balanced')
+        first = engine._damped_mount_correction(.20, -.10, 10.0)
+        second = engine._damped_mount_correction(.10, -.05, 10.25)
+        self.assertGreater(first[0], 0)
+        self.assertLess(first[1], 0)
+        self.assertGreaterEqual(second[0], 0)
+        self.assertLess(second[0], first[0])
+        self.assertLessEqual(abs(second[1]), abs(first[1]))
+
+    def test_agc_lock_freezes_current_camera_metadata_and_unlocks(self):
+        engine = VisionDashboardEngine(source='synthetic')
+        engine.source = 'picamera2'
+        engine.capture = MagicMock()
+        engine.camera_control_ranges = {
+            'ExposureValue': {'minimum': -8, 'maximum': 8},
+            'ExposureTime': {'minimum': 1, 'maximum': 66666},
+            'AnalogueGain': {'minimum': 1, 'maximum': 16},
+        }
+        engine.camera_metadata = {'ExposureTime': 321, 'AnalogueGain': 1.75}
+        engine.hil_enabled = True
+        engine.set_camera_agc_lock(True)
+        self.assertFalse(engine.camera_auto_exposure)
+        self.assertEqual(engine.camera_manual_exposure_us, 321)
+        self.assertEqual(engine.camera_manual_gain, 1.75)
+        engine.capture.set_controls.assert_called_with(
+            {'AeEnable': False, 'ExposureTime': 321, 'AnalogueGain': 1.75})
+        engine.set_camera_agc_lock(False)
+        self.assertTrue(engine.camera_auto_exposure)
+        engine.capture.set_controls.assert_called_with(
+            {'AeEnable': True, 'ExposureValue': engine.camera_exposure_value})
+
+    def test_gain_lock_holds_gain_and_software_adjusts_exposure(self):
+        engine = VisionDashboardEngine(source='synthetic')
+        engine.source = 'picamera2'
+        engine.capture = MagicMock()
+        engine.camera_control_ranges = {
+            'ExposureValue': {'minimum': -8, 'maximum': 8},
+            'ExposureTime': {'minimum': 1, 'maximum': 66666},
+            'AnalogueGain': {'minimum': 1, 'maximum': 16},
+        }
+        engine.camera_metadata = {'ExposureTime': 1000, 'AnalogueGain': 2.5}
+        engine.set_camera_gain_lock(True)
+        self.assertTrue(engine.camera_gain_locked)
+        self.assertFalse(engine.camera_auto_exposure)
+        engine.capture.reset_mock()
+        engine._adjust_locked_gain_exposure(
+            np.full((40, 40), 30, dtype=np.uint8), now=1.0)
+        controls = engine.capture.set_controls.call_args.args[0]
+        self.assertFalse(controls['AeEnable'])
+        self.assertGreater(controls['ExposureTime'], 1000)
+        self.assertEqual(controls['AnalogueGain'], 2.5)
+        engine.set_camera_gain_lock(False)
+        self.assertFalse(engine.camera_gain_locked)
+        self.assertTrue(engine.camera_auto_exposure)
 
 
 if __name__ == '__main__':

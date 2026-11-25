@@ -16,7 +16,8 @@ removed from it during this extraction.
 
 - Browser-based live video with click-to-lock feature tracking.
 - Threshold-object Demo Mode and synthetic hardware-loop testing.
-- CSRT feature tracking with correlation and jump credibility checks.
+- KCF feature tracking by default, with MOSSE and higher-CPU CSRT alternatives,
+  correlation checks and jump-credibility checks.
 - Lost-target latch that freezes correction rather than hunting blindly.
 - Automatic reacquisition only after two consistent, unique matches to the
   original selected image patch.
@@ -27,6 +28,10 @@ removed from it during this extraction.
 - Runtime Picamera2 hardware-control enumeration and camera-specific exposure,
   exposure-compensation and analogue-gain limits.
 - Camera-recovery and motor-link/bridge-recovery controls.
+- Manual press-and-hold target placement, point-centering, nine measured COSMOS
+  tracking-rate caps, immediate jog controls and a relative encoder marker.
+- Non-blocking camera discovery and recovery: the page and Bridge controls remain
+  usable while a camera is absent or retrying.
 
 Physical optical closed-loop performance is still under supervised development.
 Passing software tests does not establish unattended tracking safety, mechanical
@@ -78,6 +83,11 @@ The service expects this checkout at `~/telescope-optical-tracking-control`. Ove
 addresses with the environment variables documented in
 `tools/run_pi_vision_dashboard.sh`.
 
+The service starts after a graphical login on the tested desktop Pi. Starting it
+before any login requires the separate administrator action documented in
+[`docs/PI-VISION-STACK.md`](docs/PI-VISION-STACK.md); that pre-login configuration
+was not completed in the 2026-11-25 verification.
+
 ## Testing
 
 The included tests use simulated adapters and do not move physical hardware:
@@ -88,6 +98,19 @@ python -m unittest -v test_motor_control.py test_position_control.py test_vision
 
 See [the complete Pi vision-stack engineering notes](docs/PI-VISION-STACK.md) and
 [the captured OV5647 control manifest](hardware/camera-profiles/ov5647-libcamera-controls.json).
+
+## Current verification status — 2026-11-25
+
+- The companion Bridge management API, both motor encoders and approximately
+  3.998 Hz polling with zero observed overruns were verified after reboot.
+- The dashboard document now loads even when the MJPEG stream has no frames;
+  startup telemetry also tolerates an empty object list.
+- The installed OV5647 was detected but produced repeated libcamera
+  `Camera frontend has timed out` errors in both the dashboard and a standalone
+  `rpicam-still` check. This is an unresolved CSI cable/sensor data-path problem,
+  not a verified dashboard recovery failure.
+- No real-camera closed-loop tracking or new physical motion test was completed
+  in this verification session.
 
 ## Repository boundary
 

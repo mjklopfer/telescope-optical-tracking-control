@@ -30,14 +30,29 @@
     .mode-rocker button:last-child { border-radius:0 5px 5px 0; }
     .mode-rocker .active { opacity:1; font-weight:850; box-shadow:0 0 12px currentColor; }
     body.live-mode #liveMode { background:#17653a; border-color:#4ee38a; color:#d9ffe8; }
+    body:not(.live-mode) #testMode { background:#8a4b12; border-color:#ffad42; color:#fff0d1; }
+    .mode-selectors { display:grid; gap:6px; }
+    .test-mode-tabs { display:flex; gap:5px; justify-content:center; }
+    .test-mode-tabs button { padding:5px 9px; font-size:12px; opacity:.65; }
+    .test-mode-tabs button.active { opacity:1; font-weight:800; border-color:#ffad42; }
+    body.live-mode .test-mode-tabs { display:none; }
+    body.hybrid-mode #hybridMode { background:#126681; border-color:#4cc9f0; color:#e0f9ff; }
+    body.transfer-mode #transferMode { background:#593a92; border-color:#bd8cff; color:#f0e5ff; }
     body.demo-mode #demoMode { background:#8a4b12; border-color:#ffad42; color:#fff0d1; }
     body.live-mode #demoControls { display:none; }
     body.demo-mode #liveControls { display:none; }
+    body.hybrid-mode #demoControls { display:none; }
+    body.transfer-mode #demoControls { display:none; }
+    body:not(.transfer-mode) #transferFunctionControls { display:none; }
     .mode-banner { padding:13px 16px; border:2px solid; border-radius:8px; font-size:15px; }
     .mode-banner strong { display:block; font-size:20px; margin-bottom:3px; letter-spacing:.03em; }
     body.live-mode .mode-banner { background:#113c2a; border-color:#4ee38a; color:#dcffea; }
+    body.hybrid-mode .mode-banner { background:#0d3f50; border-color:#4cc9f0; color:#e0f9ff; }
+    body.transfer-mode .mode-banner { background:#2e1d50; border-color:#bd8cff; color:#f0e5ff; }
     body.demo-mode .mode-banner { background:#512e0e; border-color:#ffad42; color:#fff0d1; }
     body.live-mode #liveControls { border:2px solid #4ee38a; }
+    body.hybrid-mode #liveControls { border:2px solid #4cc9f0; }
+    body.transfer-mode #liveControls { border:2px solid #bd8cff; }
     body.demo-mode #demoControls { border:2px solid #ffad42; }
     main { max-width:1400px; margin:auto; padding:14px; display:grid; gap:14px; }
     .top { display:grid; grid-template-columns:minmax(480px, 2fr) minmax(270px, .8fr); gap:14px; }
@@ -48,9 +63,20 @@
     #modeWatermark { position:absolute; z-index:3; top:10px; left:10px; padding:7px 10px;
       border-radius:5px; font-weight:900; font-size:14px; line-height:1; pointer-events:none; }
     body.live-mode #modeWatermark { background:rgba(16,101,58,.9); border:1px solid #4ee38a; }
+    body.hybrid-mode #modeWatermark { background:rgba(18,102,129,.92); border:1px solid #4cc9f0; }
+    body.transfer-mode #modeWatermark { background:rgba(89,58,146,.92); border:1px solid #bd8cff; }
     body.demo-mode #modeWatermark { background:rgba(138,75,18,.92); border:1px solid #ffad42; }
+    #videoStaleOverlay { position:absolute; inset:0; z-index:5; display:flex; align-items:center;
+      justify-content:center; text-align:center; padding:24px; background:rgba(7,29,45,.82); color:#d9efff;
+      font-size:20px; font-weight:900; line-height:1.35; letter-spacing:.02em; }
+    #videoStaleOverlay small { display:block; margin-top:9px; color:#9fc6de; font-size:13px; font-weight:600; }
     h2 { font-size:16px; margin:0 0 10px; }
     .controls { display:grid; gap:10px; }
+    .controls,.controls * { min-width:0; }
+    .controls fieldset { width:100%; max-width:100%; margin-inline:0; }
+    .controls .row { flex-wrap:wrap; }
+    .controls select,.controls input,.controls button { max-width:100%; }
+    .controls button { overflow-wrap:anywhere; }
     label { color:var(--muted); display:grid; gap:4px; }
     select,input,button { color:var(--text); background:#101820; border:1px solid #53687a;
       padding:7px; border-radius:4px; }
@@ -66,13 +92,21 @@
     .legend { display:flex; gap:14px; color:var(--muted); margin:6px 0 0; }
     .swatch { width:11px; height:3px; display:inline-block; vertical-align:middle; margin-right:4px; }
     #message { min-height:20px; color:var(--amber); }
+    .manual-jog { margin-top:12px; padding:12px; border:2px solid #4cc9f0; border-radius:7px; background:#102330; }
+    .jog-grid { width:min(430px,100%); display:grid; grid-template-columns:1fr 1fr 1fr; gap:7px; align-items:stretch; }
+    .jog-grid button { min-height:48px; font-size:15px; touch-action:none; user-select:none; }
+    .jog-grid .stop { background:#7c2633; border-color:#ff5d73; font-weight:900; }
+    .jog-grid .blank { visibility:hidden; }
     @media (max-width:850px) { .top,.charts { grid-template-columns:1fr; } }
   </style>
 </head>
 <body>
   <header>
     <h1>Telescope Visual Tracking Dashboard</h1>
-    <div class="mode-rocker"><button id="liveMode">LIVE MODE</button><button id="demoMode">DEMO MODE</button></div>
+    <div class="mode-selectors">
+      <div class="mode-rocker"><button id="liveMode">LIVE MODE</button><button id="testMode">TEST MODE</button></div>
+      <div id="testModeTabs" class="test-mode-tabs"><button id="demoMode">Synthetic Demo</button><button id="hybridMode">Hybrid Camera</button><button id="transferMode">Transfer Function</button></div>
+    </div>
     <span id="socketBadge" class="badge searching">CONNECTING</span>
     <span id="trackBadge" class="badge searching">STARTING</span>
     <span id="motorBadge" class="badge error">MOTOR OUTPUT DISABLED</span>
@@ -83,34 +117,49 @@
       <div class="panel">
         <h2>Live camera and selectable objects</h2>
         <div class="video-wrap">
-          <img id="video" src="/video_feed" alt="Live tracking camera">
+          <img id="video" alt="Live tracking camera">
           <canvas id="overlay"></canvas>
           <span id="modeWatermark">LIVE CAMERA</span>
+          <div id="videoStaleOverlay"><div>CAMERA FRAME STALE — NO LIVE VIDEO<small id="videoStaleText">Waiting for a current camera frame.</small></div></div>
         </div>
         <p id="videoHelp" style="color:var(--muted)">Click the image to select a tracking target.</p>
       </div>
       <aside id="liveControls" class="panel controls">
-        <h2>Live optical tracking</h2>
+        <h2 id="controlPanelTitle">Live optical tracking</h2>
         <div class="warning">Tracking output starts OFF. Select a camera, click a distinct high-contrast feature, confirm the lock box, then turn tracking ON only with the telescope clear to move.</div>
+        <fieldset id="transferFunctionControls">
+          <legend>Simulated encoder-to-image mapping</legend>
+          <div class="row"><label>Azimuth → X (px/degree)<input id="transferAzX" type="number" min="-1000" max="1000" step="1" value="180"></label><label>Azimuth → Y (px/degree)<input id="transferAzY" type="number" min="-1000" max="1000" step="1" value="25"></label></div>
+          <div class="row"><label>Elevation → X (px/degree)<input id="transferElX" type="number" min="-1000" max="1000" step="1" value="-18"></label><label>Elevation → Y (px/degree)<input id="transferElY" type="number" min="-1000" max="1000" step="1" value="-150"></label></div>
+          <button id="applyTransferFunction">Apply transfer function and reset encoder origin</button>
+          <p style="color:var(--muted)">The generated target makes one slow 30-minute pan across the artificial field. Real encoder displacement moves it by <b>path − M × encoder delta</b>. Learn / validate freezes the path, probes both motors, and must recover this mapping without optical input.</p>
+          <p id="transferFunctionStatus" class="warning">Waiting for live encoders.</p>
+        </fieldset>
         <label>Camera
           <div class="row"><select id="cameraSelect"><option value="">Searching for cameras…</option></select><button id="refreshCameras">Refresh camera list</button><button id="recoverCamera">Recover camera</button></div>
         </label>
-        <p style="color:var(--muted)">Recover camera turns optical motor output OFF and restarts only the vision/camera service. The telescope bridge remains running, and this page reconnects automatically.</p>
+        <p id="cameraInventoryStatus" style="color:var(--muted)">Camera discovery runs in the background; the dashboard remains usable.</p>
+        <p style="color:var(--muted)">Recover camera reopens capture without restarting this web dashboard. Recovery is confirmed only after three advancing frames. If recovery fails, background retries continue while the Bridge and this page remain online.</p>
+        <p id="cameraRecoveryStatus" class="warning">Camera recovery has not been requested.</p>
         <label>Camera resolution and frame rate
           <div class="row"><select id="cameraSetting"><option value="">Select a camera</option></select><button id="applyCamera">Use selected camera</button></div>
         </label>
         <fieldset>
           <legend>Camera exposure and gain</legend>
           <label><span><input id="autoExposure" type="checkbox" checked> Automatic exposure and gain</span></label>
-          <label>Automatic exposure compensation <span id="exposureValueRange">(camera range pending)</span>
+          <label>Automatic exposure compensation <span id="exposureValueRange">(camera range pending)</span> — selected <b id="exposureValueSelected">0</b>
             <input id="exposureValue" type="range" min="-4" max="4" step="0.25" value="0">
           </label>
           <div class="row">
-            <label>Manual exposure (µs) <span id="manualExposureRange"></span><input id="manualExposure" type="number" min="100" max="1000000" value="10000"></label>
-            <label>Manual analogue gain <span id="manualGainRange"></span><input id="manualGain" type="number" min="1" max="32" step="0.1" value="1"></label>
+            <label>Manual exposure to apply (µs) <span id="manualExposureRange"></span><input id="manualExposure" type="number" min="100" max="1000000" value="10000"></label>
+            <label>Manual analogue gain to apply <span id="manualGainRange"></span><input id="manualGain" type="number" min="1" max="32" step="0.1" value="1"></label>
           </div>
           <button id="applyExposure">Apply camera exposure</button>
-          <p style="color:var(--muted)">Automatic is the default. Manual values are used only when automatic exposure and gain is unchecked. Hardware limits are read from the selected Pi camera; USB cameras without control enumeration retain conservative fallback limits.</p>
+          <button id="gainLock">LOCK GAIN / KEEP AUTO EXPOSURE</button>
+          <button id="agcLock">LOCK AGC AT CURRENT LEVEL</button>
+          <p id="gainLockStatus" class="warning">Gain and exposure are automatic.</p>
+          <p id="agcLockStatus" class="warning">AGC is automatic.</p>
+          <p style="color:var(--muted)">These two number boxes are editable settings, not readouts. Uncheck Automatic exposure and gain, enter both values, then click Apply camera exposure. The current camera-reported exposure and gain appear in the Live optical tracking status below. Hardware limits are read from the selected Pi camera; USB cameras without control enumeration retain conservative fallback limits.</p>
         </fieldset>
         <fieldset>
           <legend>Preview and tracking image curve</legend>
@@ -120,25 +169,46 @@
           <button id="applyCurve">Apply image curve</button>
           <p id="curveSummary" style="color:var(--muted)">Black 0; white 255; gamma 1.00.</p>
         </fieldset>
+        <fieldset>
+          <legend>Preview orientation</legend>
+          <div class="row">
+            <label><span><input id="previewMirror" type="checkbox"> Mirror left / right</span></label>
+            <label><span><input id="previewFlip" type="checkbox"> Flip top / bottom</span></label>
+            <button id="applyPreviewOrientation">Apply orientation</button>
+          </div>
+          <p style="color:var(--muted)">This transforms the actual image used for preview, click-to-lock and tracking. Applying it clears the current feature lock. Camera-to-mount mappings are stored separately for each orientation.</p>
+        </fieldset>
         <label>Tracking aim
           <select id="aimMode"><option value="center">Bring selected feature to frame center</option><option value="hold">Track at its present field position</option></select>
         </label>
+        <label>Live-image click behavior
+          <select id="liveClickMode"><option value="continuous">Continuous tracking — single click locks using Tracking aim</option><option value="point-goto">Point GoTo — single click reseeds/holds; use Center selected point</option></select>
+        </label>
+        <button id="centerSelected">Center selected point</button>
+        <p style="color:var(--muted)">Point GoTo lets repeated single clicks recover the green lock without making the mount chase. Click Center selected point only after the box is stable. At any time, press and hold the image for 0.5 seconds to freeze motor correction and pin the green box under the cursor; drag while held, then release to reseed and resume automatic tracking.</p>
+        <label>Maximum tracking slew rate
+          <div class="row"><select id="trackingSlewLimit"><option value="0.002278">Rate 1 — approximately 0.0023°/s</option><option value="0.004234">Rate 2 — approximately 0.0042°/s</option><option value="0.017272">Rate 3 — approximately 0.017°/s</option><option value="0.036242">Rate 4 — approximately 0.036°/s</option><option value="0.0753" selected>Rate 5 — approximately 0.075°/s — default</option><option value="0.272472">Rate 6 — approximately 0.27°/s</option><option value="1.010633">Rate 7 — approximately 1.01°/s</option><option value="1.761224">Rate 8 — approximately 1.76°/s</option><option value="2.908309">Rate 9 — approximately 2.91°/s</option></select><button id="trackingSlewLimitButton">Apply tracking rate</button></div>
+          <div class="small">All nine choices use this COSMOS 90GT profile's measured effective one-second pulse averages. This control applies the corresponding degrees/second as the software tracking-correction cap; it does not send a continuous native manual-jog command.</div>
+        </label>
+        <p style="color:var(--muted)">Limits how quickly optical corrections advance the finite motor target. It can be changed while tracking. This is separate from manual jog levels 1–9 and does not rewrite the mount's native slew table.</p>
+        <div class="row"><button id="zeroEncoderMarker">Zero encoder marker at center</button><span class="small">Makes the current encoder-reported position coincide with the fixed center cross. Relative session reference only; it does not align the telescope.</span></div>
         <fieldset>
           <legend>Measured camera-to-mount mapping</legend>
           <label>Maximum bounded probe movement
-            <select id="orientationStep"><option value="0.005">0.005°</option><option value="0.01">0.01°</option><option value="0.02">0.02°</option><option value="0.05">0.05°</option><option value="0.1">0.1°</option><option value="0.5" selected>0.5° — default</option><option value="1">1.0°</option></select>
+            <select id="orientationStep"><option value="0.005">0.005°</option><option value="0.01">0.01°</option><option value="0.02">0.02°</option><option value="0.05" selected>0.05° — default</option><option value="0.1">0.1°</option><option value="0.5">0.5°</option><option value="1">1.0°</option></select>
           </label>
           <label>Calibration motor slew level
-            <select id="orientationRate"><option value="1" selected>1 — slowest (default)</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9">9 — fastest</option></select>
+            <select id="orientationRate"><option value="1">1 — slowest</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5" selected>5 — default</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9">9 — fastest</option></select>
           </label>
-          <div class="row"><button id="learnOrientation">Learn / validate motor mapping</button><button id="clearOrientation">Clear saved mapping</button></div>
+          <div class="row"><button id="learnOrientation">Learn / validate motor mapping</button><button id="abortOrientation" class="stop">Abort learning</button><button id="clearOrientation">Clear saved mapping</button></div>
           <p id="orientationStatus" class="warning">Not learned. Lock a stable feature before enabling output.</p>
           <div class="readouts">
             <span>Azimuth motor image direction</span><b id="azimuthMapping">Not measured</b>
             <span>Elevation motor image direction</span><b id="elevationMapping">Not measured</b>
             <span>Mapping source</span><b id="mappingSource">Not measured</b>
           </div>
-          <p style="color:var(--muted)">Required before optical motor output. RESUME / ON runs this automatically when no valid mapping exists. Each axis probe now starts at no more than 0.05° and increases only when the feature moves less than 3 pixels, never exceeding the selected maximum. The telescope measures the feature's pixel vector and encoder delta, returns at no more than level 2, saves the result, then begins tracking. Use slew level 1 when preserving a narrow-field lock matters.</p>
+          <p style="color:var(--muted)">A saved measured mapping is used directly when RESUME / ON is pressed. Learn / validate measures both axes with bounded probes, returns to the starting encoder position, saves the mapping, and leaves tracking output OFF until you press RESUME / ON.</p>
+          <p style="color:var(--muted)">Before measuring either axis direction, learning runs three alternating forward/reverse sweeps in 0.02° encoder increments, up to 0.20°. It fits the repeatable transition from encoder-only travel to coherent pixel motion, rejects inconsistent/noisy trials, and takes up the measured backlash before calculating pixels per degree.</p>
         </fieldset>
         <fieldset>
           <legend>Vibration and lost-lock handling</legend>
@@ -152,10 +222,13 @@
           </label>
           <p style="color:var(--muted)">Vibration filtering smooths short excursions below the threshold; a persistent change is accepted after three frames. Return mode commands the last encoder position where the feature was visible, then stops there while the camera attempts reacquisition. It does not perform an unbounded sky scan.</p>
         </fieldset>
+        <label>Live feature tracker
+          <select id="liveTracker"><option value="KCF" selected>KCF — default / fast</option><option value="MOSSE">MOSSE — fastest</option><option value="CSRT">CSRT — accurate / high CPU</option></select>
+        </label>
         <label>Click-to-lock box size
           <select id="liveBoxSize"><option value="0.06">6% — small feature</option><option value="0.12" selected>12% — normal</option><option value="0.20">20% — large feature</option></select>
         </label>
-        <p style="color:var(--muted)">Click the live image to lock a high-contrast point. A fixed-size CSRT box follows the selected texture. If that exact feature is no longer credible, motor corrections freeze and the display shows REACQUIRING; tracking resumes only after the original feature produces two consistent, unique template matches. Click again with tracking OFF to choose another target.</p>
+        <p style="color:var(--muted)">Click the live image to lock a high-contrast point. KCF is the default because it keeps Raspberry Pi camera capture responsive; MOSSE is lighter and CSRT uses substantially more CPU. Changing tracker resets the current feature lock.</p>
         <div class="row"><button id="liveClear">Clear target lock</button><button id="resetLiveView">Reset live view</button><button id="liveRecord">Start telemetry recording</button></div>
         <label>Optical tracking output
           <div class="rocker"><button id="liveMotorOff" class="active-off">OFF</button><button id="liveMotorOn">RESUME / ON</button><span id="liveMotorPilot" class="pilot"></span><b id="liveMotorState">DISARMED</b></div>
@@ -201,7 +274,7 @@
         <label>Hardware-in-the-loop motor output
           <div class="rocker"><button id="motorOff" class="active-off">OFF</button><button id="motorOn">ON</button><span id="motorPilot" class="pilot" title="Motor output state"></span><b id="motorStateText">DISARMED</b></div>
         </label>
-        <label>Motor target dispatch rate
+        <label>Motor command update rate
           <div class="row"><select id="hilRate"><option>1</option><option>2</option><option selected>4</option><option>6</option><option>8</option><option>10</option><option>15</option><option>20</option></select>
             <button id="hilRateButton">Apply while output is OFF</button></div>
         </label>
@@ -214,13 +287,20 @@
             <select id="hilCoast"><option value="0.25">0.25 s</option><option value="0.5" selected>0.5 s</option><option value="1">1 s</option><option value="2">2 s</option><option value="3">3 s</option><option value="5">5 s — aggressive</option></select>
             <button id="hilLossButton">Apply while output is OFF</button></div>
         </label>
-        <label>Outer-loop prediction and lead
-          <div class="row"><select id="controlPreset"><option value="off">Off — latest position only</option><option value="conservative">Conservative</option><option value="balanced">Balanced</option><option value="aggressive">Aggressive</option><option value="auto">Auto-estimate lag</option><option value="custom">Custom</option></select>
-            <input id="predictionHorizon" type="number" min="0" max="1.5" step="0.05" value="0.25" title="Prediction horizon, seconds">
-            <input id="proportionalLead" type="number" min="0" max="1" step="0.05" value="0.2" title="Proportional lead">
-            <input id="correctionDeadband" type="number" min="0" max="0.5" step="0.01" value="0.03" title="Correction deadband, degrees">
+        <label>Damped tracking response
+          <div class="row"><select id="controlPreset"><option value="off">Off — legacy full correction</option><option value="conservative">Conservative</option><option value="balanced" selected>Balanced — default</option><option value="aggressive">Aggressive</option><option value="auto">Auto-estimate lag</option><option value="custom">Custom</option></select>
+            <input id="predictionHorizon" type="number" min="0" max="1.5" step="0.05" value="0.05" title="Prediction look-ahead, seconds">
+            <input id="proportionalLead" type="number" min="0" max="1" step="0.05" value="0.55" title="Position gain: lower values approach the target more gently">
+            <input id="derivativeDamping" type="number" min="0" max="0.5" step="0.01" value="0.10" title="Derivative braking, seconds">
+            <input id="correctionDeadband" type="number" min="0" max="0.5" step="0.01" value="0.02" title="Center deadband, degrees">
             <button id="controlPresetButton">Apply while output is OFF</button></div>
         </label>
+        <p style="color:var(--muted)">Balanced uses proportional approach plus derivative braking: correction shrinks near center and braking increases when the error closes quickly. The deadband prevents backlash-driven reversal chatter. Integral action is intentionally omitted.</p>
+        <label>Initial slow-object trajectory feed-forward
+          <div class="row"><label><span><input id="initialTrajectoryEnabled" type="checkbox"> Learn drift while motor output is OFF</span></label><select id="initialTrajectoryWindow"><option value="1">1 second</option><option value="2" selected>2 seconds</option><option value="3">3 seconds</option><option value="5">5 seconds</option><option value="10">10 seconds</option></select><button id="initialTrajectoryApply">Apply while output is OFF</button></div>
+        </label>
+        <p id="initialTrajectoryStatus" style="color:var(--muted)">Initial trajectory learning is OFF.</p>
+        <p style="color:var(--muted)">Optional: with a stable optical lock and motors OFF, regress the object's natural pixel drift and convert it to an initial mount rate. This is intended only for slow, approximately constant motion; fast or erratic objects may not produce a useful estimate.</p>
         <label><span><input id="blinkEnabled" type="checkbox"> Blink/fade largest synthetic object</span></label>
         <div class="row">
           <label>Fade out (s)<input id="fadeOut" type="number" min="0.1" max="10" step="0.1" value="0.5"></label>
@@ -230,7 +310,7 @@
         </div>
         <button id="blinkButton">Apply blink test while output is OFF</button>
         <div id="blinkStatus" style="color:var(--muted)">Synthetic blink test disabled.</div>
-        <div id="hilDetails" class="warning">Display-only mode. Relaunch with a guarded motor endpoint to enable hardware-loop testing.</div>
+        <div id="hilDetails" class="warning">Display-only mode. Connect a supported telescope controller to enable motor testing.</div>
         <div id="evaluationNotice" class="warning">Display-only mode; motor output is unavailable.</div>
         <div class="readouts">
           <span>Selected ID</span><b id="selected">—</b>
@@ -247,7 +327,7 @@
     </section>
 
     <section id="bridgePanel" class="panel">
-      <div class="row"><h2 style="flex:4">Control Bridge and motor link</h2><button id="refreshBridge">Refresh status</button><button id="reconnectBridge">Reconnect Motor Link</button><button id="restartBridge">Restart Bridge &amp; Reconnect Motors</button></div>
+      <div class="row"><h2 style="flex:4">Control Bridge and motor link</h2><button id="refreshBridge">Refresh status</button><button id="reconnectBridge">Reconnect Motor Link</button><button id="restartBridge">Recover Bridge &amp; Motor Link</button></div>
       <div class="readouts">
         <span>Bridge management API</span><b id="bridgeManagement">—</b>
         <span>Bridge process state</span><b id="bridgeReady">—</b>
@@ -257,7 +337,31 @@
         <span>Last connection error</span><b id="bridgeError">—</b>
       </div>
       <p id="bridgeMessage" style="color:var(--muted)">Waiting for the read-only Bridge management endpoint.</p>
-      <p class="warning"><b>Reconnect Motor Link</b> rebuilds this dashboard's connection to a running Bridge. <b>Restart Bridge &amp; Reconnect Motors</b> restarts the Pi user service, waits for the Bridge, then rebuilds and verifies the motor link. Either action pauses optical motor output first; neither restarts the telescope Wi-Fi adapter.</p>
+      <div class="row">
+        <label>Encoder feedback stale notice (seconds)
+          <input id="feedbackTimeout" type="number" min="3" max="60" step="1" value="10">
+        </label>
+        <button id="feedbackTimeoutButton">Apply timeout</button>
+      </div>
+      <p class="warning">Default: 10 seconds. Late or missing encoder replies show a stale/unconfirmed notice, but the dashboard retains the warm Bridge connection and keeps polling. Only a closed socket or real network failure starts reconnection.</p>
+      <p class="warning"><b>Reconnect Motor Link</b> rebuilds only this dashboard's connection to a Bridge that is already healthy. <b>Recover Bridge &amp; Motor Link</b> releases the dashboard client, stops the Bridge, allows the legacy Wi-Fi socket to close, refreshes the Pi's current LAN address, starts the Bridge, then requires fresh replies from both motor encoders. Use Recover after a Pi reboot, LAN-address change, stale Bridge connection or failed Reconnect. Neither action reboots the telescope Wi-Fi adapter.</p>
+      <div class="manual-jog">
+        <div class="row"><h2 style="flex:4">Immediate manual motion</h2><label>Motor speed (1–9)<select id="manualJogSpeed"><option>1</option><option>2</option><option>3</option><option>4</option><option selected>5</option><option>6</option><option>7</option><option>8</option><option>9</option></select></label></div>
+        <p>Available immediately whenever both encoder replies are live. Press and hold a direction button; release to Stop. This does not require a camera target, motor mapping, local sky reference or tracking arm.</p>
+        <div class="readouts">
+          <span>Azimuth encoder now</span><b id="manualAzEncoder">—</b>
+          <span>Elevation encoder now</span><b id="manualElEncoder">—</b>
+          <span>Change since latest jog began</span><b id="manualJogDelta">No jog commanded yet</b>
+          <span>Encoder feedback age</span><b id="manualEncoderAge">—</b>
+        </div>
+        <p style="color:var(--muted)">Encoder readings update asynchronously. The displayed jog change remains after Stop so brief motion can be confirmed.</p>
+        <div class="jog-grid">
+          <span class="blank"></span><button id="jogUp">Up / EL +</button><span class="blank"></span>
+          <button id="jogLeft">Left / AZ −</button><button id="jogStop" class="stop">STOP</button><button id="jogRight">Right / AZ +</button>
+          <span class="blank"></span><button id="jogDown">Down / EL −</button><span class="blank"></span>
+        </div>
+        <p id="manualMotionStatus" class="warning">Waiting for live azimuth and elevation feedback.</p>
+      </div>
     </section>
 
     <section class="charts">
@@ -302,6 +406,24 @@
     let state = null;
     let socket;
     let roiStart=null,roiCurrent=null;
+    let lastFrameNumber=null,lastFrameAdvanceMs=0,lastCameraState='STARTING';
+    let videoReconnectTimer=null,videoReconnectAttempts=0;
+
+    function reconnectVideo(reason='Live video stream ended.') {
+      if(videoReconnectTimer)return;
+      video.dataset.failed='1';
+      videoReconnectAttempts+=1;
+      showStaleFrame(`${reason} Reconnecting video stream (attempt ${videoReconnectAttempts})…`);
+      videoReconnectTimer=setTimeout(()=>{
+        videoReconnectTimer=null;
+        video.src=`/video_feed?reconnect=${Date.now()}`;
+      },Math.min(3000,500+videoReconnectAttempts*250));
+    }
+    function videoConnected(){
+      video.dataset.failed='';videoReconnectAttempts=0;drawOverlay();
+      if(lastFrameAdvanceMs&&Date.now()-lastFrameAdvanceMs<=1500)
+        document.getElementById('videoStaleOverlay').hidden=true;
+    }
 
     function send(message) {
       if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -310,9 +432,9 @@
 
     function connect() {
       socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
-      socket.onopen = () => setSocket('CONNECTED', true);
-      socket.onclose = () => { setSocket('DISCONNECTED', false); setTimeout(connect, 1500); };
-      socket.onerror = () => setSocket('ERROR', false);
+      socket.onopen = () => {setSocket('CONNECTED', true);if(video.dataset.failed)reconnectVideo('Dashboard reconnected.');};
+      socket.onclose = () => { setSocket('DISCONNECTED', false);showStaleFrame('Dashboard connection lost; video freshness cannot be verified.');setTimeout(connect, 1500); };
+      socket.onerror = () => {setSocket('ERROR', false);showStaleFrame('Dashboard connection error; video freshness cannot be verified.');};
       socket.onmessage = event => {
         const data = JSON.parse(event.data);
         if (data.event === 'command_error') { document.getElementById('message').textContent = data.message; return; }
@@ -323,21 +445,27 @@
       const badge = document.getElementById('socketBadge'); badge.textContent = text;
       badge.className = `badge ${good ? 'locked' : 'lost'}`;
     }
+    function showStaleFrame(message){const panel=document.getElementById('videoStaleOverlay');panel.hidden=false;document.getElementById('videoStaleText').textContent=message;}
+    function updateFrameFreshness(data){const now=Date.now(),frame=Number(data.frame);lastCameraState=String(data.state||'UNKNOWN');if(Number.isFinite(frame)&&frame!==lastFrameNumber){lastFrameNumber=frame;lastFrameAdvanceMs=now;}const staleState=/CAMERA OFFLINE|CAMERA RECOVERY|ERROR/.test(lastCameraState);if(staleState||!lastFrameAdvanceMs||now-lastFrameAdvanceMs>1500){showStaleFrame(staleState?`${lastCameraState}: ${data.error||'No new camera frame.'}`:`Frame ${lastFrameNumber??'—'} has not advanced for more than 1.5 seconds.`);}else{document.getElementById('videoStaleOverlay').hidden=true;}}
 
     function update(data) {
       state = data;
-      const live=data.ui_mode==='live';document.body.className=live?'live-mode':'demo-mode';
-      document.getElementById('modeBannerTitle').textContent=live?'LIVE MODE — REAL CAMERA / REAL TELESCOPE':'DEMO MODE — SYNTHETIC TARGET / TEST CONTROLS';
-      document.getElementById('modeBannerText').textContent=live?'Click a real image feature, then use RESUME / ON to command the connected mount.':'Synthetic evaluation only. Return to LIVE MODE before attempting optical tracking.';
-      document.getElementById('modeWatermark').textContent=live?'LIVE CAMERA':'DEMO — SYNTHETIC IMAGE';
-      document.getElementById('videoHelp').textContent=live?'Click a high-contrast point to create a fixed-size feature lock.':'Click a bounding box to select it. Amber boxes are available objects; the selected object is green.';
-      document.getElementById('liveMode').className=live?'active':'';document.getElementById('demoMode').className=live?'':'active';
+      updateFrameFreshness(data);
+      const live=data.ui_mode==='live',hybrid=data.ui_mode==='hybrid',transfer=data.ui_mode==='transfer';document.body.className=live?'live-mode':(hybrid?'hybrid-mode':(transfer?'transfer-mode':'demo-mode'));
+      document.getElementById('modeBannerTitle').textContent=live?'LIVE MODE — REAL CAMERA / REAL TELESCOPE':(hybrid?'HYBRID CAMERA TEST — REAL CAMERA / SYNTHETIC TARGET / REAL TELESCOPE':(transfer?'TRANSFER-FUNCTION TEST — NO OPTICAL INPUT / REAL ENCODERS / SIMULATED IMAGE RESPONSE':'DEMO MODE — SYNTHETIC TARGET / TEST CONTROLS'));
+      document.getElementById('modeBannerText').textContent=live?'Click a real image feature, then use RESUME / ON to command the connected mount.':(hybrid?'The real camera and Bridge stay active while a generated dot supplies repeatable motor targets.':(transfer?'A moving synthetic object is displaced by real encoder motion through the configured 2×2 transfer matrix. Use Learn / validate to identify it.':'Synthetic evaluation only. Return to LIVE MODE before attempting optical tracking.'));
+      document.getElementById('modeWatermark').textContent=live?'LIVE CAMERA':(hybrid?'LIVE CAMERA + SYNTHETIC TARGET':(transfer?'LIVE CAMERA + ENCODER-DRIVEN TARGET':'DEMO — SYNTHETIC IMAGE'));
+      document.getElementById('videoHelp').textContent=live?'Click a high-contrast point to create a fixed-size feature lock.':(hybrid?'Synthetic target is selected automatically; the camera image remains live underneath.':(transfer?'The selected dot combines a moving object path with real azimuth/elevation encoder response.':'Click a bounding box to select it. Amber boxes are available objects; the selected object is green.'));
+      document.getElementById('controlPanelTitle').textContent=transfer?'Transfer-function mapping trainer':(hybrid?'Hybrid camera test':'Live optical tracking');
+      document.getElementById('liveMode').className=live?'active':'';document.getElementById('testMode').className=!live?'active':'';document.getElementById('hybridMode').className=hybrid?'active':'';document.getElementById('transferMode').className=transfer?'active':'';document.getElementById('demoMode').className=!live&&!hybrid&&!transfer?'active':'';
+      const tf=data.transfer_function_test||{},tfc=tf.coefficients||{};[['transferAzX','azimuth_x_px_per_degree'],['transferAzY','azimuth_y_px_per_degree'],['transferElX','elevation_x_px_per_degree'],['transferElY','elevation_y_px_per_degree']].forEach(([id,key])=>{const e=document.getElementById(id);if(!e.dataset.pending&&tfc[key]!=null)e.value=tfc[key];e.disabled=!transfer||Boolean(data.hardware_loop?.enabled);});document.getElementById('applyTransferFunction').disabled=!transfer||Boolean(data.hardware_loop?.enabled);document.getElementById('transferFunctionStatus').textContent=!transfer?'Transfer test inactive.':(tf.encoder_live?`Encoder response live. 30-minute pan ${Number(tf.path_elapsed_seconds||0).toFixed(0)} / ${Number(tf.path_duration_seconds||1800).toFixed(0)} s; ΔAZ ${Number(tf.encoder_delta_degrees?.[0]||0).toFixed(4)}°, ΔEL ${Number(tf.encoder_delta_degrees?.[1]||0).toFixed(4)}°; simulated image offset X ${Number(tf.plant_offset_pixels?.[0]||0).toFixed(1)} px, Y ${Number(tf.plant_offset_pixels?.[1]||0).toFixed(1)} px.${tf.path_frozen_for_learning?' Object path frozen for mapping measurement.':''}`:'Waiting for fresh azimuth and elevation encoder feedback.');
       document.getElementById('message').textContent = data.error || '';
-      const trackingMode=document.getElementById('trackingMode'),featureAlgorithm=document.getElementById('featureAlgorithm'),lockRoiSize=document.getElementById('lockRoiSize');if(!trackingMode.dataset.pending)trackingMode.value=data.tracking_mode||'threshold';if(!featureAlgorithm.dataset.pending)featureAlgorithm.value=data.feature_algorithm||'CSRT';if(!lockRoiSize.dataset.pending)lockRoiSize.checked=data.feature_lock_size!==false;featureAlgorithm.disabled=data.tracking_mode!=='feature-roi'||data.hardware_loop?.enabled;lockRoiSize.disabled=data.tracking_mode!=='feature-roi'||data.hardware_loop?.enabled;document.getElementById('trackingModeButton').disabled=Boolean(data.hardware_loop?.enabled);document.getElementById('featureHelp').textContent=data.tracking_mode==='feature-roi'?'Feature ROI mode: drag a box around a crater or texture. ROI size lock is recommended; moderate rotation tolerance, large field rotation may require reacquisition.':'Thresholded objects mode: click a detected bounding box.';
+      const trackingMode=document.getElementById('trackingMode'),featureAlgorithm=document.getElementById('featureAlgorithm'),lockRoiSize=document.getElementById('lockRoiSize');if(!trackingMode.dataset.pending)trackingMode.value=data.tracking_mode||'threshold';if(!featureAlgorithm.dataset.pending)featureAlgorithm.value=data.feature_algorithm||'KCF';if(!lockRoiSize.dataset.pending)lockRoiSize.checked=data.feature_lock_size!==false;featureAlgorithm.disabled=data.tracking_mode!=='feature-roi'||data.hardware_loop?.enabled;lockRoiSize.disabled=data.tracking_mode!=='feature-roi'||data.hardware_loop?.enabled;document.getElementById('trackingModeButton').disabled=Boolean(data.hardware_loop?.enabled);document.getElementById('featureHelp').textContent=data.tracking_mode==='feature-roi'?'Feature ROI mode: drag a box around a crater or texture. ROI size lock is recommended; moderate rotation tolerance, large field rotation may require reacquisition.':'Thresholded objects mode: click a detected bounding box.';
       const badge = document.getElementById('trackBadge');
       badge.textContent = data.state; badge.className = `badge ${String(data.state).toLowerCase()}`;
       document.getElementById('selected').textContent = data.selected_track_id ?? '—';
-      document.getElementById('count').textContent = data.objects.length;
+      const objects=Array.isArray(data.objects)?data.objects:[];
+      document.getElementById('count').textContent = objects.length;
       document.getElementById('dx').textContent = fmt(data.error_x_px, ' px');
       document.getElementById('dy').textContent = fmt(data.error_y_px, ' px');
       document.getElementById('fps').textContent = fmt(data.capture_fps, ' FPS');
@@ -348,24 +476,28 @@
       const hil=data.hardware_loop||{available:false,enabled:false};
       const linkPending=Boolean(hil.link_action_pending);const motorOn=document.getElementById('motorOn'),motorOff=document.getElementById('motorOff'),pilot=document.getElementById('motorPilot');motorOn.disabled=!hil.available||linkPending;motorOff.disabled=!hil.available;motorOn.className=hil.enabled?'active-on':'';motorOff.className=hil.enabled?'':'active-off';pilot.className=`pilot ${hil.enabled?'green':(linkPending||hil.available&&hil.connection!=='live'?'amber':'')}`;document.getElementById('motorStateText').textContent=linkPending?'RECONNECTING MOTOR LINK':(hil.enabled?'ARMED — MOVING':(hil.available&&hil.connection!=='live'?'PRESS ON TO RECONNECT':'DISARMED'));
       const cal=data.orientation_calibration||hil.orientation_calibration||{},softRunning=cal.status==='running';
-      const liveOn=document.getElementById('liveMotorOn'),liveOff=document.getElementById('liveMotorOff'),livePilot=document.getElementById('liveMotorPilot');liveOn.disabled=!hil.available||data.selected_track_id==null||softRunning||linkPending;liveOff.disabled=!hil.available;liveOn.className=hil.enabled?'active-on':'';liveOff.className=hil.enabled?'':'active-off';livePilot.className=`pilot ${hil.enabled?'green':(linkPending||softRunning||hil.available&&hil.connection!=='live'?'amber':'')}`;document.getElementById('liveMotorState').textContent=linkPending?'RECONNECTING MOTOR LINK':(softRunning?'SOFT START — MOVING':(hil.enabled?(data.state==='LOCKED'?'ARMED — TRACKING':'ARMED — MOTION FROZEN; TARGET LOST'):(hil.available&&hil.connection!=='live'?'PRESS RESUME / ON TO RECONNECT':'MOTOR LINK READY — AWAITING MOTION REQUEST')));
-      const orientationStep=document.getElementById('orientationStep'),orientationRate=document.getElementById('orientationRate');orientationStep.disabled=orientationRate.disabled=hil.enabled||softRunning||linkPending;if(!orientationRate.dataset.pending&&cal.slew_rate)orientationRate.value=String(cal.slew_rate);const learnOrientation=document.getElementById('learnOrientation'),clearOrientation=document.getElementById('clearOrientation');learnOrientation.disabled=!hil.available||data.selected_track_id==null||hil.enabled||softRunning||linkPending;clearOrientation.disabled=hil.enabled||softRunning||linkPending;document.getElementById('orientationStatus').textContent=linkPending?`Motor link reconnecting; ${hil.link_action_pending==='learn'?'mapping will start automatically after both encoders reply.':'tracking will start automatically after both encoders reply.'}`:`${cal.status||'not learned'}: ${cal.message||'Lock a stable feature, then run soft start.'}${cal.encoder_delta_counts?` Encoder deltas AZ ${cal.encoder_delta_counts[0]}, EL ${cal.encoder_delta_counts[1]}.`:''}`;
+      const liveOn=document.getElementById('liveMotorOn'),liveOff=document.getElementById('liveMotorOff'),livePilot=document.getElementById('liveMotorPilot'),cameraLive=Number.isFinite(Number(data.capture_fps))&&Number(data.frame)>=0,targetReady=data.selected_track_id!=null;liveOn.disabled=!hil.available||!cameraLive||!targetReady||softRunning||linkPending;liveOff.disabled=!hil.available;liveOn.className=hil.enabled?'active-on':'';liveOff.className=hil.enabled?'':'active-off';livePilot.className=`pilot ${hil.enabled?'green':(linkPending||softRunning||hil.available&&hil.connection!=='live'?'amber':'')}`;document.getElementById('liveMotorState').textContent=linkPending?'RECONNECTING MOTOR LINK':(softRunning?'SOFT START — MOVING':(hil.enabled?(data.state==='LOCKED'?'ARMED — TRACKING':'ARMED — MOTION FROZEN; TARGET LOST'):(!cameraLive?'CAMERA UNAVAILABLE — RESUME DISABLED':(!targetReady?'SELECT A LIVE CAMERA TARGET FIRST':(hil.available&&hil.connection!=='live'?'PRESS RESUME / ON TO RECONNECT':'MOTOR LINK READY — PRESS RESUME / ON')))));
+      const orientationStep=document.getElementById('orientationStep'),orientationRate=document.getElementById('orientationRate');const mappingLocked=!hil.available||hil.enabled||softRunning||linkPending;orientationStep.disabled=orientationRate.disabled=mappingLocked;if(!orientationStep.dataset.pending&&cal.status==='running'&&cal.step_degrees)orientationStep.value=String(cal.step_degrees);if(!orientationRate.dataset.pending&&cal.status==='running'&&cal.slew_rate)orientationRate.value=String(cal.slew_rate);const learnOrientation=document.getElementById('learnOrientation'),abortOrientation=document.getElementById('abortOrientation'),clearOrientation=document.getElementById('clearOrientation');learnOrientation.disabled=mappingLocked||data.selected_track_id==null||hil.connection!=='live';abortOrientation.disabled=!softRunning;clearOrientation.disabled=hil.enabled||softRunning||linkPending;document.getElementById('orientationStatus').textContent=linkPending?'Motor link reconnecting; learning will begin after the Bridge link is live.':`${cal.status||'not learned'}: ${cal.message||'No saved mapping is loaded.'}${cal.encoder_delta_counts?` Encoder deltas AZ ${cal.encoder_delta_counts[0]}, EL ${cal.encoder_delta_counts[1]}.`:''}`;
       const vf=hil.vibration_filter||{},vibrationEnabled=document.getElementById('vibrationEnabled'),vibrationThreshold=document.getElementById('vibrationThreshold');if(!vibrationEnabled.dataset.pending)vibrationEnabled.checked=Boolean(vf.enabled);if(!vibrationThreshold.dataset.pending&&vf.threshold_px!=null)vibrationThreshold.value=vf.threshold_px;[vibrationEnabled,vibrationThreshold,document.getElementById('vibrationApply'),document.getElementById('liveLossMode'),document.getElementById('liveLossTime'),document.getElementById('liveLossApply')].forEach(e=>e.disabled=hil.enabled||softRunning);if(!document.getElementById('liveLossMode').dataset.pending&&hil.loss_mode)document.getElementById('liveLossMode').value=hil.loss_mode;if(!document.getElementById('liveLossTime').dataset.pending&&hil.coast_seconds)document.getElementById('liveLossTime').value=String(hil.coast_seconds);
       const envelopeEnabled=document.getElementById('travelEnvelopeEnabled'),envelopeDegrees=document.getElementById('travelEnvelopeDegrees');if(!envelopeEnabled.dataset.pending)envelopeEnabled.checked=Boolean(hil.travel_envelope_enabled);if(!envelopeDegrees.dataset.pending&&hil.envelope_degrees>0)envelopeDegrees.value=hil.envelope_degrees;[envelopeEnabled,envelopeDegrees,document.getElementById('travelEnvelopeApply')].forEach(e=>e.disabled=hil.enabled||softRunning);
-      const hilRate=document.getElementById('hilRate'); hilRate.disabled=!hil.available||hil.enabled; document.getElementById('hilRateButton').disabled=!hil.available||hil.enabled; if(hil.dispatch_rate_hz&&!hilRate.dataset.pending)hilRate.value=String(hil.dispatch_rate_hz);
+      const hilRate=document.getElementById('hilRate'); hilRate.disabled=!hil.available||hil.enabled; document.getElementById('hilRateButton').disabled=!hil.available||hil.enabled; if(hil.dispatch_rate_hz&&!hilRate.dataset.pending)hilRate.value=String(hil.dispatch_rate_hz);const trackingSlewLimit=document.getElementById('trackingSlewLimit');if(hil.max_tracking_slew_deg_s&&!trackingSlewLimit.dataset.pending)trackingSlewLimit.value=String(hil.max_tracking_slew_deg_s);trackingSlewLimit.disabled=!hil.available;document.getElementById('trackingSlewLimitButton').disabled=!hil.available;document.getElementById('zeroEncoderMarker').disabled=!hil.available||hil.connection!=='live'||Boolean(hil.reference_rebasing);
       const hilSpan=document.getElementById('hilSpan'); hilSpan.disabled=!hil.available||hil.enabled; document.getElementById('hilSpanButton').disabled=!hil.available||hil.enabled; if(hil.display_span_degrees&&!hilSpan.dataset.pending)hilSpan.value=String(hil.display_span_degrees);
       const hilLoss=document.getElementById('hilLossMode'),hilCoast=document.getElementById('hilCoast'); hilLoss.disabled=!hil.available||hil.enabled; hilCoast.disabled=!hil.available||hil.enabled||hilLoss.value==='stop'; document.getElementById('hilLossButton').disabled=!hil.available||hil.enabled; if(hil.loss_mode&&!hilLoss.dataset.pending)hilLoss.value=hil.loss_mode;if(hil.coast_seconds&&!hilCoast.dataset.pending)hilCoast.value=String(hil.coast_seconds);
-      const preset=document.getElementById('controlPreset'),horizon=document.getElementById('predictionHorizon'),lead=document.getElementById('proportionalLead'),deadband=document.getElementById('correctionDeadband');if(!preset.dataset.pending&&hil.control_preset)preset.value=hil.control_preset;if(!horizon.dataset.pending&&hil.prediction_horizon_seconds!=null)horizon.value=Number(hil.prediction_horizon_seconds).toFixed(2);if(!lead.dataset.pending&&hil.proportional_lead!=null)lead.value=Number(hil.proportional_lead).toFixed(2);if(!deadband.dataset.pending&&hil.correction_deadband_degrees!=null)deadband.value=Number(hil.correction_deadband_degrees).toFixed(2);[preset,horizon,lead,deadband].forEach(e=>e.disabled=!hil.available||hil.enabled);document.getElementById('controlPresetButton').disabled=!hil.available||hil.enabled;
+      const preset=document.getElementById('controlPreset'),horizon=document.getElementById('predictionHorizon'),lead=document.getElementById('proportionalLead'),derivative=document.getElementById('derivativeDamping'),deadband=document.getElementById('correctionDeadband');if(!preset.dataset.pending&&hil.control_preset)preset.value=hil.control_preset;if(!horizon.dataset.pending&&hil.prediction_horizon_seconds!=null)horizon.value=Number(hil.prediction_horizon_seconds).toFixed(2);if(!lead.dataset.pending&&hil.proportional_lead!=null)lead.value=Number(hil.proportional_lead).toFixed(2);if(!derivative.dataset.pending&&hil.derivative_damping_seconds!=null)derivative.value=Number(hil.derivative_damping_seconds).toFixed(2);if(!deadband.dataset.pending&&hil.correction_deadband_degrees!=null)deadband.value=Number(hil.correction_deadband_degrees).toFixed(2);[preset,horizon,lead,derivative,deadband].forEach(e=>e.disabled=!hil.available||hil.enabled);document.getElementById('controlPresetButton').disabled=!hil.available||hil.enabled;
+      const trajectory=hil.initial_trajectory||{},trajectoryEnabled=document.getElementById('initialTrajectoryEnabled'),trajectoryWindow=document.getElementById('initialTrajectoryWindow');if(!trajectoryEnabled.dataset.pending)trajectoryEnabled.checked=Boolean(trajectory.enabled);if(!trajectoryWindow.dataset.pending&&trajectory.configured_window_seconds)trajectoryWindow.value=String(trajectory.configured_window_seconds);[trajectoryEnabled,trajectoryWindow,document.getElementById('initialTrajectoryApply')].forEach(e=>e.disabled=!hil.available||hil.enabled);const trajectoryRate=trajectory.mount_rate?` AZ ${Number(trajectory.mount_rate.azimuth_deg_s).toFixed(4)}°/s, EL ${Number(trajectory.mount_rate.elevation_deg_s).toFixed(4)}°/s; confidence ${(100*Number(trajectory.confidence||0)).toFixed(0)}%.`:'';document.getElementById('initialTrajectoryStatus').textContent=`${trajectory.message||'Initial trajectory status unavailable.'}${trajectoryRate}`;
       const blink=data.synthetic_blink||{},blinkEnabled=document.getElementById('blinkEnabled'); ['blinkEnabled','fadeOut','hiddenTime','fadeIn','blinkPeriod','blinkButton'].forEach(id=>document.getElementById(id).disabled=hil.enabled); if(!blinkEnabled.dataset.pending)blinkEnabled.checked=Boolean(blink.enabled); document.getElementById('blinkStatus').textContent=blink.enabled?`Blink test: ${blink.phase}; grayscale intensity ${blink.intensity}; detector threshold ${data.threshold}.`:'Synthetic blink test disabled.';
-      const motorBadge=document.getElementById('motorBadge'); motorBadge.textContent=softRunning?'SOFT START — TELESCOPE MOVING':(hil.enabled?'MOTOR OUTPUT ARMED':(hil.available&&hil.connection==='live'?'MOTOR LINK READY':'MOTOR LINK UNAVAILABLE')); motorBadge.className=`badge ${hil.enabled?'motor-on':(softRunning||hil.available&&hil.connection==='live'?'':'error')}`;
+      const confirmation=hil.target_confirmation||{},motorBadge=document.getElementById('motorBadge'); motorBadge.textContent=softRunning?'SOFT START — TELESCOPE MOVING':(hil.enabled?(confirmation.state==='moving'?'TRACKING — ENCODER MOTION CONFIRMED':confirmation.state==='lagging'?'TRACKING COMMANDS — ENCODER MOTION LAGGING':'MOTOR OUTPUT ARMED'):(hil.available&&hil.connection==='live'?'MOTOR LINK READY':'MOTOR LINK UNAVAILABLE')); motorBadge.className=`badge ${hil.enabled?'motor-on':(softRunning||hil.available&&hil.connection==='live'?'':'error')}`;
       const targetRate=hil.target_rate?` target rate AZ ${hil.target_rate.azimuth_deg_s.toFixed(2)}°/s, EL ${hil.target_rate.elevation_deg_s.toFixed(2)}°/s;`:'';
-      document.getElementById('hilDetails').textContent=hil.available ? `Hardware-loop test: ${hil.connection||'unknown'}; Encoder Reported Location follows real replies; ${hil.display_span_degrees}° display span; ±${hil.envelope_degrees}° hard envelope;${targetRate} outer loop ${hil.control_preset||'off'} (lead ${Number(hil.prediction_horizon_seconds||0).toFixed(2)}s, P ${Number(hil.proportional_lead||0).toFixed(2)}, deadband ${Number(hil.correction_deadband_degrees||0).toFixed(2)}°); ${hil.dispatch_rate_hz} Hz requested; ${hil.last_achieved_cycle_rate_hz?hil.last_achieved_cycle_rate_hz.toFixed(2)+' Hz achieved':'waiting for cycle timing'}; ${hil.cycle_overruns||0} overruns. ${hil.error||hil.rate_warning||'Synthetic image is not optical feedback.'}` : hil.description;
-      document.getElementById('evaluationNotice').textContent=!hil.available?'Display-only mode; motor output is unavailable.':softRunning?'SOFT START ACTIVE — the telescope is making bounded physical probe movements. Press OFF to cancel.':hil.enabled?'MOTOR OUTPUT ARMED — the telescope is physically moving in a supervised hardware-in-the-loop test.':'Motor link is ready. Select a target, then Learn / validate or RESUME / ON; the app verifies fresh feedback and starts the bounded mapping probe.';
-      const bridge=hil.bridge||{},bridgeRestarting=Boolean(bridge.service_restart_in_progress);document.getElementById('bridgeManagement').textContent=bridge.verified_proxy?'Verified software proxy':(bridge.management_reachable?'Responding, identity unverified':'Unavailable');document.getElementById('bridgeReady').textContent=bridgeRestarting?'Restarting':(bridge.ready===true?'Ready':(bridge.ready===false?'Not ready':'Unknown'));document.getElementById('bridgeData').textContent=bridge.dashboard_connection||'not configured';document.getElementById('bridgeReconnects').textContent=`Motor-link manual ${bridge.dashboard_manual_reconnects??0}; automatic ${bridge.dashboard_reconnections??0}; Bridge restarts ${bridge.service_restart_count??0}`;const cached=bridge.cached_positions||{},ages=Object.values(cached).map(v=>Number(v.age_seconds)).filter(Number.isFinite);document.getElementById('bridgeFeedback').textContent=ages.length?`Newest ${Math.min(...ages).toFixed(2)} s; oldest ${Math.max(...ages).toFixed(2)} s`:'No cached replies';document.getElementById('bridgeError').textContent=bridge.dashboard_last_error||'None';document.getElementById('bridgeMessage').textContent=bridge.service_restart_result||bridge.message||'No Bridge management report.';document.getElementById('reconnectBridge').disabled=!hil.available||bridgeRestarting;document.getElementById('restartBridge').disabled=!hil.available||bridgeRestarting;
-      document.getElementById('liveTargetState').textContent=data.state||'—';document.getElementById('liveDx').textContent=fmt(data.error_x_px,' px');document.getElementById('liveDy').textContent=fmt(data.error_y_px,' px');document.getElementById('liveFps').textContent=fmt(data.capture_fps,' FPS');document.getElementById('liveLink').textContent=hil.connection||'unavailable';document.getElementById('liveCamera').textContent=data.camera_device||'—';document.getElementById('liveMessage').textContent=data.error||hil.error||(data.feature_reacquiring?'Original feature is not credible. Motor corrections are frozen while the app waits for two consistent matches to the original feature.':data.selected_track_id==null?'Click a high-contrast feature to create a lock.':hil.enabled?'Tracking output is ON.':'Target locked; press Learn / validate or RESUME / ON to start motion.');
-      const cameraAuto=data.camera_auto||{},cameraLimits=cameraAuto.limits||{},autoExposure=document.getElementById('autoExposure'),exposureValue=document.getElementById('exposureValue'),manualExposure=document.getElementById('manualExposure'),manualGain=document.getElementById('manualGain');const applyCameraLimit=(element,label,limit,fallback)=>{const minimum=limit?.minimum??fallback[0],maximum=limit?.maximum??fallback[1];element.min=minimum;element.max=maximum;label.textContent=`(${minimum} to ${maximum})`;};applyCameraLimit(exposureValue,document.getElementById('exposureValueRange'),cameraLimits.ExposureValue,[-4,4]);applyCameraLimit(manualExposure,document.getElementById('manualExposureRange'),cameraLimits.ExposureTime,[100,1000000]);applyCameraLimit(manualGain,document.getElementById('manualGainRange'),cameraLimits.AnalogueGain,[1,32]);if(!autoExposure.dataset.pending)autoExposure.checked=cameraAuto.enabled!==false;if(!exposureValue.dataset.pending&&cameraAuto.exposure_value!=null)exposureValue.value=cameraAuto.exposure_value;if(!manualExposure.dataset.pending&&cameraAuto.manual_exposure_time_us)manualExposure.value=cameraAuto.manual_exposure_time_us;if(!manualGain.dataset.pending&&cameraAuto.manual_analogue_gain)manualGain.value=cameraAuto.manual_analogue_gain;[autoExposure,exposureValue,manualExposure,manualGain].forEach(e=>e.disabled=!cameraAuto.available||hil.enabled);manualExposure.disabled=manualGain.disabled=!cameraAuto.available||hil.enabled||autoExposure.checked;document.getElementById('applyExposure').disabled=!cameraAuto.available||hil.enabled;document.getElementById('liveExposure').textContent=cameraAuto.exposure_time_us?`${cameraAuto.exposure_time_us} µs${cameraAuto.enabled?' auto':' manual'}`:'—';document.getElementById('liveGain').textContent=cameraAuto.analogue_gain!=null?Number(cameraAuto.analogue_gain).toFixed(2):'—';document.getElementById('liveFocus').textContent=data.focus_score!=null?Number(data.focus_score).toFixed(1):'—';
-      const curve=data.image_curve||{},curveBlack=document.getElementById('curveBlack'),curveWhite=document.getElementById('curveWhite'),curveGamma=document.getElementById('curveGamma');if(!curveBlack.dataset.pending&&curve.black!=null)curveBlack.value=curve.black;if(!curveWhite.dataset.pending&&curve.white!=null)curveWhite.value=curve.white;if(!curveGamma.dataset.pending&&curve.gamma!=null)curveGamma.value=curve.gamma;[curveBlack,curveWhite,curveGamma].forEach(e=>e.disabled=hil.enabled);document.getElementById('applyCurve').disabled=hil.enabled;document.getElementById('curveSummary').textContent=`Black ${curveBlack.value}; white ${curveWhite.value}; gamma ${Number(curveGamma.value).toFixed(2)}.`;
-      const aim=document.getElementById('aimMode');if(!aim.dataset.pending)aim.value=data.aim_mode||'center';
+      document.getElementById('hilDetails').textContent=hil.available ? `Telescope motor test: ${hil.connection||'unknown'}; Encoder Reported Location follows asynchronous, non-blocking replies; ${hil.display_span_degrees}° display span; ±${hil.envelope_degrees}° travel limit; maximum tracking slew ${Number(hil.max_tracking_slew_deg_s||0).toFixed(2)}°/s;${targetRate} response ${hil.control_preset||'balanced'} (look-ahead ${Number(hil.prediction_horizon_seconds||0).toFixed(2)}s, position gain ${Number(hil.proportional_lead||0).toFixed(2)}, derivative braking ${Number(hil.derivative_damping_seconds||0).toFixed(2)}s, deadband ${Number(hil.correction_deadband_degrees||0).toFixed(2)}°); motor commands ${hil.dispatch_rate_hz} Hz requested / ${hil.last_achieved_cycle_rate_hz?hil.last_achieved_cycle_rate_hz.toFixed(2)+' Hz achieved':'waiting for timing'}; encoder readings ${hil.feedback_poll_rate_hz||4} Hz independently; latest target ${confirmation.state||'idle'} (does not block motion); ${hil.cycle_overruns||0} late cycles. ${hil.error||hil.rate_warning||'The simulated image is not camera feedback.'}` : hil.description;
+      document.getElementById('evaluationNotice').textContent=!hil.available?'Display-only mode; motor output is unavailable.':softRunning?'Mapping routine active — press OFF to cancel.':hil.enabled?'MOTOR OUTPUT ARMED — live pixel error is being converted directly into motor corrections.':'Motor link is ready. Select a target, then press RESUME / ON to track with the saved mapping.';
+      const bridge=hil.bridge||{},bridgeRestarting=Boolean(bridge.service_restart_in_progress);document.getElementById('bridgeManagement').textContent=bridge.verified_proxy?'Verified software proxy':(bridge.management_reachable?'Responding, identity unverified':'Unavailable');document.getElementById('bridgeReady').textContent=bridgeRestarting?'Restarting':(bridge.ready===true?'Ready':(bridge.ready===false?'Not ready':'Unknown'));document.getElementById('bridgeData').textContent=bridge.dashboard_connection||'not configured';document.getElementById('bridgeReconnects').textContent=`Motor-link manual ${bridge.dashboard_manual_reconnects??0}; automatic ${bridge.dashboard_reconnections??0}; Bridge restarts ${bridge.service_restart_count??0}`;const cached=bridge.cached_positions||{},ages=Object.values(cached).map(v=>Number(v.age_seconds)).filter(Number.isFinite);document.getElementById('bridgeFeedback').textContent=ages.length?`Newest ${Math.min(...ages).toFixed(2)} s; oldest ${Math.max(...ages).toFixed(2)} s`:'No cached replies';document.getElementById('bridgeError').textContent=bridge.dashboard_last_error||hil.error||'None';document.getElementById('bridgeMessage').textContent=bridge.service_restart_result||bridge.message||'No Bridge management report.';document.getElementById('reconnectBridge').disabled=!hil.available||bridgeRestarting;document.getElementById('restartBridge').disabled=!hil.available||bridgeRestarting;const feedbackTimeout=document.getElementById('feedbackTimeout');if(!feedbackTimeout.dataset.pending&&hil.feedback_timeout_seconds)feedbackTimeout.value=String(hil.feedback_timeout_seconds);feedbackTimeout.disabled=!hil.available;document.getElementById('feedbackTimeoutButton').disabled=!hil.available;const manualReady=hil.connection==='live'&&!bridgeRestarting,manualSpeed=document.getElementById('manualJogSpeed').value;['jogUp','jogDown','jogLeft','jogRight'].forEach(id=>document.getElementById(id).disabled=!manualReady);document.getElementById('manualJogSpeed').disabled=false;document.getElementById('jogStop').disabled=!hil.available;document.getElementById('manualMotionStatus').textContent=hil.motion==='manual_jog'?`MANUAL JOG ACTIVE — slew level ${manualSpeed}; release the direction button to Stop.`:(manualReady?`READY — slew level ${manualSpeed} selected; press and hold a direction button.`:`SLEW LEVEL ${manualSpeed} SELECTED — motion unavailable until the telescope / Bridge link is restored.`);
+      const azPos=hil.encoder_positions?.Azimuth,elPos=hil.encoder_positions?.Elevation,encoderUnavailable=bridgeRestarting?'Bridge recovery in progress':(hil.connection==='live'?'Waiting for encoder reply':'Telescope / Bridge unavailable');document.getElementById('manualAzEncoder').textContent=azPos?`${azPos.encoder} counts / ${Number(azPos.raw_degrees).toFixed(5)}°`:`NO CURRENT VALUE — ${encoderUnavailable}`;document.getElementById('manualElEncoder').textContent=elPos?`${elPos.encoder} counts / ${Number(elPos.raw_degrees).toFixed(5)}°`:`NO CURRENT VALUE — ${encoderUnavailable}`;const positionAges=[azPos?.age_seconds,elPos?.age_seconds].filter(Number.isFinite);document.getElementById('manualEncoderAge').textContent=positionAges.length?`${Math.max(...positionAges).toFixed(2)} s (${azPos?.live&&elPos?.live?'live':'stale'})`:'No encoder packets received';if(manualJogOrigin&&azPos&&elPos){const da=((Number(azPos.raw_degrees)-manualJogOrigin.az+540)%360)-180,de=Number(elPos.raw_degrees)-manualJogOrigin.el;document.getElementById('manualJogDelta').textContent=`AZ ${da>=0?'+':''}${da.toFixed(5)}°; EL ${de>=0?'+':''}${de.toFixed(5)}°`;}
+      document.getElementById('liveTargetState').textContent=data.state||'—';document.getElementById('liveDx').textContent=fmt(data.error_x_px,' px');document.getElementById('liveDy').textContent=fmt(data.error_y_px,' px');document.getElementById('liveFps').textContent=fmt(data.capture_fps,' FPS');document.getElementById('liveLink').textContent=hil.connection||'unavailable';document.getElementById('liveCamera').textContent=data.camera_device||'—';document.getElementById('liveMessage').textContent=data.tracking_error||data.error||hil.error||(data.feature_reacquiring?'Original feature is not credible; predictive motion continues while the app attempts reacquisition.':data.selected_track_id==null?'Click a high-contrast feature to create a lock.':hil.enabled?'Tracking output is ON.':'Target locked; press RESUME / ON to start tracking.');
+      const cameraRecovery=data.camera_recovery||{},cameraAuto=data.camera_auto||{},cameraLimits=cameraAuto.limits||{},autoExposure=document.getElementById('autoExposure'),exposureValue=document.getElementById('exposureValue'),manualExposure=document.getElementById('manualExposure'),manualGain=document.getElementById('manualGain'),agcLock=document.getElementById('agcLock');document.getElementById('cameraInventoryStatus').textContent=data.camera_inventory_status||'Camera discovery status unavailable.';document.getElementById('cameraRecoveryStatus').textContent=cameraRecovery.status||'Camera recovery status unavailable.';document.getElementById('recoverCamera').disabled=Boolean(cameraRecovery.in_progress);const applyCameraLimit=(element,label,limit,fallback)=>{const minimum=limit?.minimum??fallback[0],maximum=limit?.maximum??fallback[1];element.min=minimum;element.max=maximum;label.textContent=`(${minimum} to ${maximum})`;};applyCameraLimit(exposureValue,document.getElementById('exposureValueRange'),cameraLimits.ExposureValue,[-4,4]);applyCameraLimit(manualExposure,document.getElementById('manualExposureRange'),cameraLimits.ExposureTime,[100,1000000]);applyCameraLimit(manualGain,document.getElementById('manualGainRange'),cameraLimits.AnalogueGain,[1,32]);if(!autoExposure.dataset.pending)autoExposure.checked=cameraAuto.enabled!==false;if(exposureValue.dataset.pending&&cameraAuto.exposure_value!=null&&Math.abs(Number(exposureValue.value)-Number(cameraAuto.exposure_value))<.001)delete exposureValue.dataset.pending;if(!exposureValue.dataset.pending&&cameraAuto.exposure_value!=null)exposureValue.value=cameraAuto.exposure_value;document.getElementById('exposureValueSelected').textContent=Number(exposureValue.value).toFixed(2);if(manualExposure.dataset.applied&&cameraAuto.manual_exposure_time_us!=null&&Number(manualExposure.dataset.applied)===Number(cameraAuto.manual_exposure_time_us)){delete manualExposure.dataset.pending;delete manualExposure.dataset.applied;}if(manualGain.dataset.applied&&cameraAuto.manual_analogue_gain!=null&&Math.abs(Number(manualGain.dataset.applied)-Number(cameraAuto.manual_analogue_gain))<.001){delete manualGain.dataset.pending;delete manualGain.dataset.applied;}if(!manualExposure.dataset.pending&&cameraAuto.manual_exposure_time_us)manualExposure.value=cameraAuto.manual_exposure_time_us;if(!manualGain.dataset.pending&&cameraAuto.manual_analogue_gain)manualGain.value=cameraAuto.manual_analogue_gain;[autoExposure,exposureValue].forEach(e=>e.disabled=!cameraAuto.available);manualExposure.disabled=manualGain.disabled=!cameraAuto.available||autoExposure.checked;document.getElementById('applyExposure').disabled=!cameraAuto.available;agcLock.disabled=!cameraAuto.available;agcLock.textContent=cameraAuto.agc_locked?'UNLOCK AGC — RETURN TO AUTO':'LOCK AGC AT CURRENT LEVEL';agcLock.className=cameraAuto.agc_locked?'active-on':'';document.getElementById('agcLockStatus').textContent=cameraAuto.agc_locked?`AGC LOCKED — exposure ${cameraAuto.exposure_time_us??'—'} µs; analogue gain ${cameraAuto.analogue_gain!=null?Number(cameraAuto.analogue_gain).toFixed(2):'—'}.`:`AGC AUTO — current exposure ${cameraAuto.exposure_time_us??'—'} µs; analogue gain ${cameraAuto.analogue_gain!=null?Number(cameraAuto.analogue_gain).toFixed(2):'—'}.`;document.getElementById('liveExposure').textContent=cameraAuto.exposure_time_us?`${cameraAuto.exposure_time_us} µs${cameraAuto.enabled?' auto':' locked'}`:'—';document.getElementById('liveGain').textContent=cameraAuto.analogue_gain!=null?Number(cameraAuto.analogue_gain).toFixed(2):'—';document.getElementById('liveFocus').textContent=data.focus_score!=null?Number(data.focus_score).toFixed(1):'—';
+      const gainLock=document.getElementById('gainLock');gainLock.disabled=!cameraAuto.available;gainLock.textContent=cameraAuto.gain_locked?'UNLOCK GAIN — RETURN TO FULL AUTO':'LOCK GAIN / KEEP AUTO EXPOSURE';gainLock.className=cameraAuto.gain_locked?'active-on':'';document.getElementById('gainLockStatus').textContent=cameraAuto.gain_locked?`GAIN LOCKED at ${cameraAuto.analogue_gain!=null?Number(cameraAuto.analogue_gain).toFixed(2):'—'} — software auto exposure is active at ${cameraAuto.exposure_time_us??'—'} µs.`:'Gain and exposure are controlled together automatically unless a lock is selected.';
+      const curve=data.image_curve||{},curveBlack=document.getElementById('curveBlack'),curveWhite=document.getElementById('curveWhite'),curveGamma=document.getElementById('curveGamma');if(!curveBlack.dataset.pending&&curve.black!=null)curveBlack.value=curve.black;if(!curveWhite.dataset.pending&&curve.white!=null)curveWhite.value=curve.white;if(!curveGamma.dataset.pending&&curve.gamma!=null)curveGamma.value=curve.gamma;[curveBlack,curveWhite,curveGamma].forEach(e=>e.disabled=false);document.getElementById('applyCurve').disabled=false;document.getElementById('curveSummary').textContent=`Black ${curveBlack.value}; white ${curveWhite.value}; gamma ${Number(curveGamma.value).toFixed(2)}.`;
+      const imageOrientation=data.image_orientation||{},previewMirror=document.getElementById('previewMirror'),previewFlip=document.getElementById('previewFlip');if(!previewMirror.dataset.pending)previewMirror.checked=imageOrientation.horizontal==='reversed';if(!previewFlip.dataset.pending)previewFlip.checked=imageOrientation.vertical==='reversed';document.getElementById('applyPreviewOrientation').disabled=false;
+      const aim=document.getElementById('aimMode'),liveTracker=document.getElementById('liveTracker');if(!aim.dataset.pending)aim.value=data.aim_mode||'center';if(!liveTracker.dataset.pending)liveTracker.value=data.feature_algorithm||'KCF';liveTracker.disabled=Boolean(hil.enabled);
       const vectorText=v=>{if(!Array.isArray(v)||v.length<2)return'Not measured';const dx=Number(v[0]),dy=Number(v[1]);return `${dx>=0?'Right':'Left'} ${Math.abs(dx).toFixed(1)} px; ${dy>=0?'Down':'Up'} ${Math.abs(dy).toFixed(1)} px`;};document.getElementById('azimuthMapping').textContent=vectorText(cal.azimuth_vector_px);document.getElementById('elevationMapping').textContent=vectorText(cal.elevation_vector_px);document.getElementById('mappingSource').textContent=cal.valid?'Measured encoder and pixel response':'No valid measured mapping';
       updateCameras(data.cameras||[],data.camera_device,data.camera_settings);
       const encoderLive=hil.connection==='live'&&hil.marker&&hil.encoder_error;
@@ -373,7 +505,7 @@
       if(encoderLive){encoderHistory.push({t:data.monotonic_ns/1e9,az:hil.encoder_error.azimuth_degrees,el:hil.encoder_error.elevation_degrees});while(encoderHistory.length>4000)encoderHistory.shift();}
       document.getElementById('threshold').value = data.threshold;
       document.getElementById('polarity').value = data.polarity || 'bright';
-      updateObjectSelector(data.objects, data.selected_track_id);
+      updateObjectSelector(objects, data.selected_track_id);
       if (data.error_x_px != null && data.error_y_px != null) {
         history.push({t:data.monotonic_ns / 1e9, x:data.error_x_px, y:data.error_y_px,
                       id:data.selected_track_id});
@@ -389,7 +521,8 @@
       const selected=cameras.find(c=>c.device===camera.value),setting=document.getElementById('cameraSetting'),settingSignature=selected?`${selected.device}:${selected.settings.map(s=>`${s.width}x${s.height}@${s.fps}`).join(',')}`:'';
       if(setting.dataset.signature!==settingSignature){setting.innerHTML=selected?'':'<option value="">Select a camera</option>';if(selected)selected.settings.forEach(s=>{const o=document.createElement('option');o.value=JSON.stringify(s);o.textContent=`${s.width} × ${s.height} @ ${s.fps.toFixed(2)} FPS`;setting.appendChild(o);});setting.dataset.signature=settingSignature;}
       if(selected&&currentSetting&&!setting.dataset.pending){const match=[...setting.options].find(o=>{const s=JSON.parse(o.value);return s.width===currentSetting.width&&s.height===currentSetting.height&&Math.abs(s.fps-currentSetting.fps)<.01;});if(match)setting.value=match.value;}
-      [camera,setting,document.getElementById('refreshCameras'),document.getElementById('applyCamera'),document.getElementById('aimMode'),document.getElementById('liveBoxSize')].forEach(e=>e.disabled=Boolean(state?.hardware_loop?.enabled));
+      [camera,setting,document.getElementById('refreshCameras'),document.getElementById('applyCamera'),document.getElementById('liveBoxSize'),document.getElementById('liveTracker')].forEach(e=>e.disabled=Boolean(state?.hardware_loop?.enabled));
+      document.getElementById('aimMode').disabled=false;
     }
 
     function updateObjectSelector(objects, selectedId) {
@@ -426,6 +559,8 @@
         ctx.moveTo(object.x,object.y-6); ctx.lineTo(object.x,object.y+6); ctx.stroke();
         if (selected && state.ui_mode!=='live') { ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(object.x,object.y); ctx.stroke(); }
       });
+      const held=state.hardware_loop?.manual_lock_hold;
+      if(held){const size=Number(held.box_fraction||.12),w=overlay.width*size,h=overlay.height*size,x=held.x*overlay.width-w/2,y=held.y*overlay.height-h/2;ctx.strokeStyle='#bd8cff';ctx.fillStyle='#bd8cff';ctx.lineWidth=4;ctx.setLineDash([8,4]);ctx.strokeRect(x,y,w,h);ctx.setLineDash([]);ctx.font='bold 14px system-ui';ctx.fillText('Manual — Center Here',x,Math.min(overlay.height-5,y+h+18));}
       if(roiStart&&roiCurrent){ctx.strokeStyle='#4cc9f0';ctx.lineWidth=2;ctx.setLineDash([6,4]);ctx.strokeRect(Math.min(roiStart.x,roiCurrent.x),Math.min(roiStart.y,roiCurrent.y),Math.abs(roiCurrent.x-roiStart.x),Math.abs(roiCurrent.y-roiStart.y));ctx.setLineDash([]);}
       const marker=state.hardware_loop?.marker;
       if(marker){ctx.strokeStyle='#4cc9f0';ctx.fillStyle='#4cc9f0';ctx.lineWidth=3;ctx.beginPath();ctx.arc(marker.x,marker.y,14,0,Math.PI*2);ctx.stroke();ctx.font='bold 14px system-ui';ctx.fillText('Encoder Reported Location',marker.x+18,marker.y+5);}
@@ -470,16 +605,31 @@
       bins.forEach((b,i)=>{const x=(i+.5)*period.width/Math.max(1,bins.length);[['azMin','azMax','#4cc9f0',-3],['elMin','elMax','#f72585',3]].forEach(([lo,hi,color,offset])=>{periodCtx.strokeStyle=color;periodCtx.lineWidth=4;periodCtx.beginPath();periodCtx.moveTo(x+offset,period.height/2-b[lo]/rangeScale*period.height*.45);periodCtx.lineTo(x+offset,period.height/2-b[hi]/rangeScale*period.height*.45);periodCtx.stroke();});});
     }
 
+    let liveClickTimer=null,liveHoldTimer=null,liveHoldActive=false,suppressNextClick=false,lastHoldSend=0;
+    function normalizedPointer(event){const rect=overlay.getBoundingClientRect();return{x:Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width)),y:Math.max(0,Math.min(1,(event.clientY-rect.top)/rect.height))};}
+    function liveFeatureClick(event,center){
+      const rect=overlay.getBoundingClientRect(),x=(event.clientX-rect.left)/rect.width,y=(event.clientY-rect.top)/rect.height;
+      const mode=center?'center':(document.getElementById('liveClickMode').value==='point-goto'?'hold':document.getElementById('aimMode').value);
+      send({action:'set_aim_mode',mode});
+      send({action:'set_feature_point',x,y,box_fraction:Number(document.getElementById('liveBoxSize').value)});
+      if(center){setTimeout(()=>send({action:'center_selected'}),350);setTimeout(()=>{if(state?.state==='LOCKED')send({action:'center_selected'});},850);}
+    }
     overlay.addEventListener('click', event => {
+      if(suppressNextClick){suppressNextClick=false;event.preventDefault();return;}
       const rect=overlay.getBoundingClientRect();
-      if(state?.ui_mode==='live'){if(state.hardware_loop?.enabled)return;send({action:'set_aim_mode',mode:document.getElementById('aimMode').value});send({action:'set_feature_point',x:(event.clientX-rect.left)/rect.width,y:(event.clientY-rect.top)/rect.height,box_fraction:Number(document.getElementById('liveBoxSize').value)});return;}
+      if(state?.ui_mode==='live'){clearTimeout(liveClickTimer);if(document.getElementById('liveClickMode').value==='point-goto'){liveClickTimer=setTimeout(()=>liveFeatureClick(event,false),260);}else{liveFeatureClick(event,false);}return;}
       if(state?.tracking_mode==='feature-roi')return;
       send({action:'select_at',x:(event.clientX-rect.left)/rect.width,y:(event.clientY-rect.top)/rect.height});
     });
+    overlay.addEventListener('pointerdown',event=>{if(state?.ui_mode!=='live'||event.button!==0)return;const point=normalizedPointer(event);clearTimeout(liveHoldTimer);liveHoldTimer=setTimeout(()=>{liveHoldActive=true;suppressNextClick=true;clearTimeout(liveClickTimer);overlay.setPointerCapture?.(event.pointerId);send({action:'manual_lock_hold',active:true,x:point.x,y:point.y,box_fraction:Number(document.getElementById('liveBoxSize').value)});},500);});
+    overlay.addEventListener('pointermove',event=>{if(!liveHoldActive)return;const now=performance.now();if(now-lastHoldSend<80)return;lastHoldSend=now;const point=normalizedPointer(event);send({action:'manual_lock_hold',active:true,x:point.x,y:point.y,box_fraction:Number(document.getElementById('liveBoxSize').value)});});
+    function releaseManualHold(event){clearTimeout(liveHoldTimer);liveHoldTimer=null;if(!liveHoldActive)return;liveHoldActive=false;suppressNextClick=true;const point=normalizedPointer(event);send({action:'manual_lock_hold',active:false,x:point.x,y:point.y,box_fraction:Number(document.getElementById('liveBoxSize').value)});try{overlay.releasePointerCapture?.(event.pointerId);}catch(_error){}}
+    overlay.addEventListener('pointerup',releaseManualHold);overlay.addEventListener('pointercancel',releaseManualHold);
     overlay.addEventListener('mousedown',event=>{if(state?.ui_mode==='live'||state?.tracking_mode!=='feature-roi')return;const r=overlay.getBoundingClientRect();roiStart={x:(event.clientX-r.left)/r.width*overlay.width,y:(event.clientY-r.top)/r.height*overlay.height};roiCurrent={...roiStart};});
     overlay.addEventListener('mousemove',event=>{if(!roiStart)return;const r=overlay.getBoundingClientRect();roiCurrent={x:(event.clientX-r.left)/r.width*overlay.width,y:(event.clientY-r.top)/r.height*overlay.height};drawOverlay();});
     overlay.addEventListener('mouseup',event=>{if(!roiStart||!roiCurrent)return;const x=Math.min(roiStart.x,roiCurrent.x),y=Math.min(roiStart.y,roiCurrent.y),w=Math.abs(roiCurrent.x-roiStart.x),h=Math.abs(roiCurrent.y-roiStart.y);roiStart=roiCurrent=null;if(w>=5&&h>=5)send({action:'set_feature_roi',x:x/overlay.width,y:y/overlay.height,width:w/overlay.width,height:h/overlay.height});drawOverlay();});
     document.getElementById('selectButton').onclick=()=>{const v=document.getElementById('objectSelect').value;if(v)send({action:'select_track',track_id:Number(v)});};
+    document.getElementById('centerSelected').onclick=()=>send({action:'center_selected'});
     document.getElementById('trackingMode').onchange=e=>{e.target.dataset.pending='1';const feature=e.target.value==='feature-roi';document.getElementById('featureAlgorithm').disabled=!feature;document.getElementById('lockRoiSize').disabled=!feature;};
     document.getElementById('featureAlgorithm').onchange=e=>e.target.dataset.pending='1';
     document.getElementById('lockRoiSize').onchange=e=>e.target.dataset.pending='1';
@@ -492,8 +642,11 @@
     document.getElementById('motorOff').onclick=()=>send({action:'set_hil_enabled',enabled:false});
     document.getElementById('liveMotorOn').onclick=()=>send({action:'set_hil_enabled',enabled:true});
     document.getElementById('liveMotorOff').onclick=()=>send({action:'set_hil_enabled',enabled:false});
+    document.getElementById('liveTracker').onchange=e=>{e.target.dataset.pending='1';send({action:'set_tracking_mode',mode:'feature-roi',algorithm:e.target.value,lock_size:true});delete e.target.dataset.pending;};
+    document.getElementById('orientationStep').onchange=e=>e.target.dataset.pending='1';
     document.getElementById('orientationRate').onchange=e=>e.target.dataset.pending='1';
-    document.getElementById('learnOrientation').onclick=()=>{const step=Number(document.getElementById('orientationStep').value),rate=Number(document.getElementById('orientationRate').value);if(confirm(`The telescope will probe both axes by ${step}° at slew level ${rate} and return. Confirm clear travel and continue?`))send({action:'start_orientation_learning',step,rate});};
+    document.getElementById('learnOrientation').onclick=()=>{const step=Number(document.getElementById('orientationStep').value),rate=Number(document.getElementById('orientationRate').value);send({action:'start_orientation_learning',step,rate});delete document.getElementById('orientationStep').dataset.pending;delete document.getElementById('orientationRate').dataset.pending;};
+    document.getElementById('abortOrientation').onclick=()=>send({action:'abort_orientation_learning'});
     document.getElementById('clearOrientation').onclick=()=>{if(confirm('Clear the saved camera-to-mount mapping for this camera, resolution, and telescope?'))send({action:'clear_orientation_profile'});};
     document.getElementById('vibrationEnabled').onchange=e=>e.target.dataset.pending='1';
     document.getElementById('vibrationThreshold').onchange=e=>e.target.dataset.pending='1';
@@ -504,37 +657,70 @@
     document.getElementById('travelEnvelopeEnabled').onchange=e=>e.target.dataset.pending='1';
     document.getElementById('travelEnvelopeDegrees').onchange=e=>e.target.dataset.pending='1';
     document.getElementById('travelEnvelopeApply').onclick=()=>{const e=document.getElementById('travelEnvelopeEnabled'),d=document.getElementById('travelEnvelopeDegrees');send({action:'set_hil_travel_envelope',enabled:e.checked,degrees:Number(d.value)});delete e.dataset.pending;delete d.dataset.pending;};
-    document.getElementById('liveMode').onclick=()=>{if(!state?.hardware_loop?.enabled)send({action:'set_operating_mode',mode:'live'});};
-    document.getElementById('demoMode').onclick=()=>{if(!state?.hardware_loop?.enabled)send({action:'set_operating_mode',mode:'demo'});};
+    document.getElementById('liveMode').onclick=()=>send({action:'set_operating_mode',mode:'live'});
+    document.getElementById('testMode').onclick=()=>{if(state?.ui_mode==='live')send({action:'set_operating_mode',mode:'demo'});};
+    document.getElementById('hybridMode').onclick=()=>send({action:'set_operating_mode',mode:'hybrid'});
+    document.getElementById('transferMode').onclick=()=>send({action:'set_operating_mode',mode:'transfer'});
+    document.getElementById('demoMode').onclick=()=>send({action:'set_operating_mode',mode:'demo'});
+    ['transferAzX','transferAzY','transferElX','transferElY'].forEach(id=>document.getElementById(id).onchange=e=>e.target.dataset.pending='1');
+    document.getElementById('applyTransferFunction').onclick=()=>{const ids=['transferAzX','transferAzY','transferElX','transferElY'],v=ids.map(id=>Number(document.getElementById(id).value));send({action:'set_transfer_function',azimuth_x:v[0],azimuth_y:v[1],elevation_x:v[2],elevation_y:v[3]});ids.forEach(id=>delete document.getElementById(id).dataset.pending);};
     document.getElementById('aimMode').onchange=e=>{e.target.dataset.pending='1';send({action:'set_aim_mode',mode:e.target.value});delete e.target.dataset.pending;};
     document.getElementById('liveClear').onclick=()=>send({action:'clear_selection'});
     document.getElementById('resetLiveView').onclick=()=>{history.length=0;encoderHistory.length=0;send({action:'reset_live_view'});};
     document.getElementById('liveRecord').onclick=()=>send({action:'set_recording',enabled:!Boolean(state?.recording)});
     document.getElementById('refreshCameras').onclick=()=>send({action:'refresh_cameras'});
-    document.getElementById('recoverCamera').onclick=()=>send({action:'recover_camera'});
+    document.getElementById('recoverCamera').onclick=()=>{document.getElementById('cameraRecoveryStatus').textContent='Recovery request sent; waiting for the camera worker.';document.getElementById('recoverCamera').disabled=true;send({action:'recover_camera'});};
     document.getElementById('cameraSelect').onchange=e=>{e.target.dataset.pending='1';e.target.dataset.pending='';updateCameras(state?.cameras||[],e.target.value,null);};
     document.getElementById('cameraSetting').onchange=e=>e.target.dataset.pending='1';
     document.getElementById('applyCamera').onclick=()=>{const c=document.getElementById('cameraSelect'),s=document.getElementById('cameraSetting');if(!c.value||!s.value)return;const setting=JSON.parse(s.value);send({action:'set_camera',device:c.value,...setting});delete c.dataset.pending;delete s.dataset.pending;};
     ['autoExposure','exposureValue','manualExposure','manualGain'].forEach(id=>document.getElementById(id).onchange=e=>{e.target.dataset.pending='1';if(id==='autoExposure'){document.getElementById('manualExposure').disabled=e.target.checked;document.getElementById('manualGain').disabled=e.target.checked;}});
-    document.getElementById('applyExposure').onclick=()=>{const a=document.getElementById('autoExposure'),e=document.getElementById('exposureValue'),t=document.getElementById('manualExposure'),g=document.getElementById('manualGain');send({action:'set_camera_exposure',automatic:a.checked,exposure_value:Number(e.value),exposure_time_us:Number(t.value),analogue_gain:Number(g.value)});[a,e,t,g].forEach(x=>delete x.dataset.pending);};
+    ['manualExposure','manualGain'].forEach(id=>document.getElementById(id).oninput=e=>{e.target.dataset.pending='1';delete e.target.dataset.applied;});
+    document.getElementById('exposureValue').oninput=e=>{e.target.dataset.pending='1';document.getElementById('exposureValueSelected').textContent=Number(e.target.value).toFixed(2);};
+    document.getElementById('applyExposure').onclick=()=>{const a=document.getElementById('autoExposure'),e=document.getElementById('exposureValue'),t=document.getElementById('manualExposure'),g=document.getElementById('manualGain');t.dataset.pending='1';g.dataset.pending='1';t.dataset.applied=t.value;g.dataset.applied=g.value;send({action:'set_camera_exposure',automatic:a.checked,exposure_value:Number(e.value),exposure_time_us:Number(t.value),analogue_gain:Number(g.value)});delete a.dataset.pending;setTimeout(()=>delete e.dataset.pending,2000);};
+    document.getElementById('agcLock').onclick=()=>send({action:'set_camera_agc_lock',locked:!Boolean(state?.camera_auto?.agc_locked)});
+    document.getElementById('gainLock').onclick=()=>send({action:'set_camera_gain_lock',locked:!Boolean(state?.camera_auto?.gain_locked)});
     ['curveBlack','curveWhite','curveGamma'].forEach(id=>document.getElementById(id).oninput=()=>{document.getElementById('curveSummary').textContent=`Black ${document.getElementById('curveBlack').value}; white ${document.getElementById('curveWhite').value}; gamma ${Number(document.getElementById('curveGamma').value).toFixed(2)}.`;document.getElementById(id).dataset.pending='1';});
     document.getElementById('applyCurve').onclick=()=>{const b=document.getElementById('curveBlack'),w=document.getElementById('curveWhite'),g=document.getElementById('curveGamma');send({action:'set_image_curve',black:Number(b.value),white:Number(w.value),gamma:Number(g.value)});[b,w,g].forEach(x=>delete x.dataset.pending);};
+    ['previewMirror','previewFlip'].forEach(id=>document.getElementById(id).onchange=e=>e.target.dataset.pending='1');
+    document.getElementById('applyPreviewOrientation').onclick=()=>{const h=document.getElementById('previewMirror'),v=document.getElementById('previewFlip');send({action:'set_image_orientation',horizontal:h.checked?'reversed':'normal',vertical:v.checked?'reversed':'normal'});delete h.dataset.pending;delete v.dataset.pending;};
     document.getElementById('refreshBridge').onclick=()=>send({action:'refresh_bridge_status'});
     document.getElementById('reconnectBridge').onclick=()=>send({action:'reconnect_bridge_client'});
     document.getElementById('restartBridge').onclick=()=>send({action:'restart_bridge_service'});
+    document.getElementById('feedbackTimeout').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('feedbackTimeoutButton').onclick=()=>{const e=document.getElementById('feedbackTimeout');send({action:'set_hil_feedback_timeout',value:Number(e.value)});delete e.dataset.pending;};
+    let manualJogTimer=null,manualJogActive=null,manualJogOrigin=null;
+    function manualJogStart(axis,direction,event){event.preventDefault();if(state?.hardware_loop?.connection!=='live')return;const p=state?.hardware_loop?.encoder_positions;if(p?.Azimuth&&p?.Elevation)manualJogOrigin={az:Number(p.Azimuth.raw_degrees),el:Number(p.Elevation.raw_degrees)};manualJogActive={axis,direction};const command=()=>send({action:'manual_jog',axis,direction,rate:Number(document.getElementById('manualJogSpeed').value)});command();clearInterval(manualJogTimer);manualJogTimer=setInterval(command,700);}
+    function manualJogStop(){if(manualJogActive)send({action:'manual_stop'});manualJogActive=null;clearInterval(manualJogTimer);manualJogTimer=null;}
+    [['jogUp','elevation',1],['jogDown','elevation',-1],['jogLeft','azimuth',-1],['jogRight','azimuth',1]].forEach(([id,axis,direction])=>{const button=document.getElementById(id);button.onpointerdown=event=>manualJogStart(axis,direction,event);button.onpointerup=manualJogStop;button.onpointercancel=manualJogStop;button.onpointerleave=manualJogStop;button.oncontextmenu=event=>event.preventDefault();});
+    document.getElementById('jogStop').onclick=()=>{manualJogActive={};manualJogStop();};
+    window.addEventListener('blur',manualJogStop);
     document.getElementById('hilRate').onchange=e=>e.target.dataset.pending='1';
     document.getElementById('hilRateButton').onclick=()=>{const e=document.getElementById('hilRate');send({action:'set_hil_dispatch_rate',value:Number(e.value)});delete e.dataset.pending;};
+    document.getElementById('trackingSlewLimit').onchange=e=>e.target.dataset.pending='1';
+    document.getElementById('trackingSlewLimitButton').onclick=()=>{const e=document.getElementById('trackingSlewLimit');send({action:'set_hil_max_tracking_slew',value:Number(e.value)});delete e.dataset.pending;};
+    document.getElementById('zeroEncoderMarker').onclick=()=>send({action:'zero_encoder_marker'});
     document.getElementById('hilSpan').onchange=e=>e.target.dataset.pending='1';
     document.getElementById('hilSpanButton').onclick=()=>{const e=document.getElementById('hilSpan');send({action:'set_hil_display_span',value:Number(e.value)});delete e.dataset.pending;};
     document.getElementById('hilLossMode').onchange=e=>{e.target.dataset.pending='1';document.getElementById('hilCoast').disabled=e.target.value==='stop'||e.target.disabled;};
     document.getElementById('hilCoast').onchange=e=>e.target.dataset.pending='1';
     document.getElementById('hilLossButton').onclick=()=>{const m=document.getElementById('hilLossMode'),c=document.getElementById('hilCoast');send({action:'set_hil_loss_behavior',mode:m.value,coast_seconds:Number(c.value)});delete m.dataset.pending;delete c.dataset.pending;};
-    ['controlPreset','predictionHorizon','proportionalLead','correctionDeadband'].forEach(id=>document.getElementById(id).onchange=e=>e.target.dataset.pending='1');
-    document.getElementById('controlPresetButton').onclick=()=>{const p=document.getElementById('controlPreset'),h=document.getElementById('predictionHorizon'),l=document.getElementById('proportionalLead'),d=document.getElementById('correctionDeadband');send({action:'set_hil_control_strategy',preset:p.value,horizon:Number(h.value),proportional:Number(l.value),deadband:Number(d.value)});delete p.dataset.pending;delete h.dataset.pending;delete l.dataset.pending;delete d.dataset.pending;};
+    ['controlPreset','predictionHorizon','proportionalLead','derivativeDamping','correctionDeadband'].forEach(id=>document.getElementById(id).onchange=e=>e.target.dataset.pending='1');
+    document.getElementById('controlPresetButton').onclick=()=>{const p=document.getElementById('controlPreset'),h=document.getElementById('predictionHorizon'),l=document.getElementById('proportionalLead'),v=document.getElementById('derivativeDamping'),d=document.getElementById('correctionDeadband');send({action:'set_hil_control_strategy',preset:p.value,horizon:Number(h.value),proportional:Number(l.value),derivative:Number(v.value),deadband:Number(d.value)});[p,h,l,v,d].forEach(e=>delete e.dataset.pending);};
+    document.getElementById('initialTrajectoryEnabled').onchange=e=>e.target.dataset.pending='1';document.getElementById('initialTrajectoryWindow').onchange=e=>e.target.dataset.pending='1';document.getElementById('initialTrajectoryApply').onclick=()=>{const enabled=document.getElementById('initialTrajectoryEnabled'),windowElement=document.getElementById('initialTrajectoryWindow');send({action:'set_initial_trajectory_learning',enabled:enabled.checked,window_seconds:Number(windowElement.value)});delete enabled.dataset.pending;delete windowElement.dataset.pending;};
     document.getElementById('blinkEnabled').onchange=e=>e.target.dataset.pending='1';
     document.getElementById('blinkButton').onclick=()=>{const e=document.getElementById('blinkEnabled');send({action:'set_synthetic_blink',enabled:e.checked,fade_out_seconds:Number(document.getElementById('fadeOut').value),hidden_seconds:Number(document.getElementById('hiddenTime').value),fade_in_seconds:Number(document.getElementById('fadeIn').value),period_seconds:Number(document.getElementById('blinkPeriod').value)});delete e.dataset.pending;};
     document.getElementById('windowSeconds').onchange=drawCharts;
-    video.onload=drawOverlay; connect();
+    setInterval(()=>{if(lastFrameAdvanceMs&&Date.now()-lastFrameAdvanceMs>1500)showStaleFrame(`Frame ${lastFrameNumber??'—'} has not advanced for more than 1.5 seconds.`);},500);
+    video.onload=videoConnected;
+    video.onerror=()=>reconnectVideo('Browser lost the live video stream.');
+    connect();
+    // An MJPEG response is intentionally endless. Starting it before the
+    // document load event keeps the browser's page-load indicator spinning,
+    // and a camera with no frames may send no bytes at all. Bring up the full
+    // status/control UI first, then attach the video stream independently.
+    window.addEventListener('load',()=>{
+      video.src=`/video_feed?initial=${Date.now()}`;
+    },{once:true});
   </script>
 </body>
 </html>

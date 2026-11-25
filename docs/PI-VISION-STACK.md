@@ -125,8 +125,9 @@ object by clicking its box or using the visible-object list; either method can
 change the active object. **Thresholded objects** is the Demo Mode default.
 
 **Feature ROI** is an explicit alternative for a crater or other textured feature.
-Drag a rectangle around it and select CSRT, KCF or MOSSE. CSRT is the robust default
-but is substantially slower on the Pi. **Lock Feature ROI size** defaults ON to
+Drag a rectangle around it and select KCF, MOSSE or CSRT. KCF is the live-camera
+default because it preserves better Pi responsiveness; CSRT is available when
+its higher CPU cost is acceptable. **Lock Feature ROI size** defaults ON to
 prevent scale drift and growing boxes; disable it only when real target scale is
 expected to change. CSRT tolerates moderate scale/appearance/field rotation, not
 arbitrary rotation. KCF and MOSSE trade robustness for speed. CSV recording is
@@ -137,9 +138,10 @@ control and labels motor output unavailable.
 
 Live Mode is the normal startup page. It enumerates Linux V4L2 capture cameras,
 lists the resolution/frame-rate combinations advertised by each camera, and can
-refresh that inventory after a camera is added. Apply camera changes only while
-tracking output is OFF. On the validated Pi, `auto` selects the USB UVC camera in
-preference to a generic video node.
+refresh that inventory after a camera is added. Discovery and camera recovery run
+outside the request path so an absent or failing camera does not prevent the page
+or Bridge controls from loading. On the validated Pi, `auto` selects the USB UVC
+camera in preference to a generic video node.
 
 Start Control Bridge first, with no other data client, then run:
 
@@ -184,17 +186,18 @@ The launcher discovers the Pi's routed IPv4 address and adds this standalone
 checkout to `PYTHONPATH`; no address or import-path edit is required after a
 normal DHCP address change.
 
-If the page loads but remains at frame `-1` / **STARTING**, restart only
-`telescope-vision-dashboard.service`. A libcamera `Camera frontend has timed out`
-message means the CSI sensor was detected but delivered no image data; if one
-service restart does not recover it, power down and reseat or replace the ribbon
-cable/sensor. If the Bridge service shows repeated restarts while the dashboard
+If the page loads but remains at frame `-1`, use **Recover camera** first. It
+reopens capture in-process and leaves the dashboard and Bridge online; background
+retries continue if no advancing frames arrive. A libcamera `Camera frontend has
+timed out` message means the CSI sensor was detected but delivered no image data;
+if a standalone `rpicam-still` test also times out, power down and reseat or
+replace the ribbon cable/sensor. If the Bridge service shows repeated restarts while the dashboard
 remains available, inspect its status: the normal cause is the telescope adapter
 refusing or resetting the upstream connection. The service keeps retrying, but it
 cannot repair a lost SSID configuration or power-cycle the physical adapter.
 
 Click a distinct high-contrast point while output is OFF. The page creates a
-fixed-size CSRT region around the click. Choose **Bring selected feature to frame
+fixed-size KCF region around the click by default. Choose **Bring selected feature to frame
 center** or **Track at its present field position** before selecting the point.
 The second choice records the clicked location as the desired image location.
 Camera rotation, mirroring and axis direction are measured by the bounded
@@ -212,10 +215,10 @@ address the large initial jump seen in early tests, but physical repeatability
 still requires another supervised telescope session.
 
 Feature ROI tracking retains the original clicked image patch. Three consecutive
-non-credible CSRT results release the drifting tracker and change the state to
+non-credible tracker results release the drifting tracker and change the state to
 **REACQUIRING**. Motor corrections freeze; the program does not scan the mount or
 promote arbitrary new points. It searches the camera frame for a unique match to
-the original patch and recreates CSRT only after two spatially consistent frames.
+the original patch and recreates the selected tracker only after two spatially consistent frames.
 This preserves a sensitive normal lock while preventing aimless hunting after the
 object leaves the field. A returned original feature can therefore reestablish
 tracking automatically. Similar-looking repeated texture can remain ambiguous,
@@ -258,6 +261,17 @@ fresh, and a supervised dashboard-client reconnect returned to a live connection
 with zero motor output. This does not yet verify physical optical closed-loop
 tracking; click-lock, lost-feature latching, two-frame reacquisition and direction
 safety are software/OpenCV tested only.
+
+Rechecked on 2026-11-25 after reboot: the companion Bridge management endpoint
+was verified, both encoder streams were fresh, and polling held approximately
+3.998 Hz with zero observed overruns. The dashboard document loaded and its
+Bridge controls updated without waiting for MJPEG bytes. The installed OV5647
+was detected but delivered no frame in either the dashboard or a standalone
+`rpicam-still` probe; both reported `Camera frontend has timed out`. Camera
+hardware recovery, real-image tracking and fresh physical motion validation
+therefore remain incomplete. The Pi still reported user lingering disabled, so
+pre-login service startup is also not verified; graphical-login startup remains
+the tested path.
 
 The bright-contour IDs are temporary nearest-neighbor associations, not semantic
 identities. Crossing objects, occlusion or large inter-frame movement can exchange

@@ -1,7 +1,6 @@
 [Unit]
 Description=Telescope Visual Tracking Dashboard
-Wants=network-online.target celestron-bridge.service
-After=network-online.target celestron-bridge.service
+Wants=celestron-bridge.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -9,7 +8,7 @@ Type=simple
 WorkingDirectory=%h/telescope-optical-tracking-control
 ExecStart=%h/telescope-optical-tracking-control/tools/run_pi_vision_dashboard.sh
 Restart=always
-RestartSec=5
+RestartSec=2
 TimeoutStopSec=5
 KillMode=control-group
 SendSIGKILL=yes
